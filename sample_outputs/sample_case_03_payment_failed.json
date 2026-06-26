@@ -1,0 +1,44 @@
+{
+  "request": {
+    "ticket_id": "T-2026-0003",
+    "complaint": "My payment of 1200 taka to merchant Daraz failed but the amount was deducted from my account.",
+    "language": "en",
+    "user_type": "customer",
+    "transaction_history": [
+      {
+        "transaction_id": "TXN-3001",
+        "timestamp": "2026-01-16T11:00:00",
+        "type": "payment",
+        "amount": 1200.0,
+        "counterparty": "Daraz",
+        "status": "failed"
+      },
+      {
+        "transaction_id": "TXN-3002",
+        "timestamp": "2026-01-15T16:20:00",
+        "type": "payment",
+        "amount": 1200.0,
+        "counterparty": "Daraz",
+        "status": "failed"
+      }
+    ]
+  },
+  "response": {
+    "ticket_id": "T-2026-0003",
+    "relevant_transaction_id": null,
+    "evidence_verdict": "insufficient_data",
+    "case_type": "payment_failed",
+    "severity": "high",
+    "department": "payments_ops",
+    "agent_summary": "Customer reports BDT 1,200.00 payment attempted but balance was deducted. Evidence could not be confirmed against available data.",
+    "recommended_next_action": "Confirm transaction N/A status with payments switch, initiate refund trace if money was debited, and update customer within SLA.",
+    "customer_reply": "Thank you for reaching out. We see your payment of BDT 1,200.00 (transaction N/A) is under review. If your balance was deducted, our payments team will process any eligible adjustment through official channels within the standard timeline. Please do not share your PIN, OTP, or password with anyone. bKash will never ask for these.",
+    "human_review_required": true,
+    "confidence": 0.75,
+    "reason_codes": [
+      "status_claim_no_match",
+      "human_review_high_uncertain",
+      "evidence_insufficient"
+    ]
+  }
+}

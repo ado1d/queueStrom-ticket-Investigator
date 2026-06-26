@@ -1,0 +1,25 @@
+# Render Blueprint — QueueStorm Investigator
+# Deploy: render.com → New → Blueprint → point at this repo.
+# Free web service: 512 MB RAM, spins down after 15 min idle (acceptable for a
+# demo service that is hit on-demand by the judging panel).
+services:
+  - type: web
+    name: queuestorm-investigator
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: "8000"
+      - key: ENABLE_LLM
+        value: "true"
+      - key: GEMINI_API_KEY
+        sync: false          # set in Render dashboard; never commit
+      - key: LLM_TIMEOUT
+        value: "8"
+      - key: LOG_LEVEL
+        value: "INFO"

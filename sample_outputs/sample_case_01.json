@@ -1,0 +1,46 @@
+{
+  "request": {
+    "ticket_id": "T-2026-0001",
+    "complaint": "I sent 5000 taka to the wrong number yesterday by mistake. Please reverse it.",
+    "language": "en",
+    "channel": "in_app_chat",
+    "user_type": "customer",
+    "transaction_history": [
+      {
+        "transaction_id": "TXN-9101",
+        "timestamp": "2026-01-15T14:32:00",
+        "type": "transfer",
+        "amount": 5000.0,
+        "counterparty": "01712345678",
+        "status": "completed"
+      },
+      {
+        "transaction_id": "TXN-9102",
+        "timestamp": "2026-01-14T09:15:00",
+        "type": "payment",
+        "amount": 350.0,
+        "counterparty": "Daraz",
+        "status": "completed"
+      }
+    ]
+  },
+  "response": {
+    "ticket_id": "T-2026-0001",
+    "relevant_transaction_id": "TXN-9101",
+    "evidence_verdict": "consistent",
+    "case_type": "wrong_transfer",
+    "severity": "high",
+    "department": "dispute_resolution",
+    "agent_summary": "Customer reports transferring BDT 5,000.00 to the wrong recipient (transaction TXN-9101). Evidence matches the transaction data.",
+    "recommended_next_action": "Verify recipient identity, freeze outgoing leg of transaction TXN-9101, and escalate to dispute_resolution for reversal eligibility check.",
+    "customer_reply": "Thank you for contacting us. We understand you sent BDT 5,000.00 to the wrong recipient. We have flagged transaction TXN-9101 for review by our dispute team. Any eligible adjustment will be processed through official channels after verification. We will update you on the outcome. Please do not share your PIN, OTP, or password with anyone. bKash will never ask for these.",
+    "human_review_required": true,
+    "confidence": 1.0,
+    "reason_codes": [
+      "wrong_transfer",
+      "human_review_wrong_transfer",
+      "transaction_match",
+      "evidence_consistent"
+    ]
+  }
+}

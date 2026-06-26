@@ -1,0 +1,223 @@
+"""Case classifier + routing decision tree.
+
+Implements PRD section 11.4. Phishing detection runs FIRST so we never
+route a scam complaint into the wrong queue. Severity boosts and
+human_review rules are centralised here.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+
+from .evidence import Clues
+
+
+@dataclass
+class Classification:
+    case_type: str
+    severity: str
+    department: str
+    human_review_required: bool
+    reason_codes: List[str]
+
+    def to_dict(self) -> Dict:
+        return {
+            "case_type": self.case_type,
+            "severity": self.severity,
+            "department": self.department,
+            "human_review_required": self.human_review_required,
+            "reason_codes": list(self.reason_codes),
+        }
+
+
+_SEVERITY_ORDER = ["low", "medium", "high", "critical"]
+
+
+def _bump_severity(severity: str, levels: int = 1) -> str:
+    try:
+        idx = _SEVERITY_ORDER.index(severity)
+    except ValueError:
+        idx = 0
+    return _SEVERITY_ORDER[min(idx + levels, len(_SEVERITY_ORDER) - 1)]
+
+
+def _has_topic(clues: Clues, name: str) -> bool:
+    return name in clues.topics
+
+
+def _has_status_claim(clues: Clues, name: str) -> bool:
+    return clues.status_claim == name
+
+
+def classify(
+    clues: Clues,
+    verdict_label: str,
+    matched_txn: Optional[Dict],
+    user_type: Optional[str] = None,
+    confidence: float = 1.0,
+) -> Classification:
+    reason_codes: List[str] = []
+
+    # 0. Phishing wins always.
+    if _has_topic(clues, "phishing"):
+        reason_codes.append("phishing_keywords")
+        reason_codes.append("human_review")
+        return Classification(
+            case_type="phishing_or_social_engineering",
+            severity="critical",
+            department="fraud_risk",
+            human_review_required=True,
+            reason_codes=reason_codes,
+        )
+
+    case_type = "other"
+    severity = "low"
+    department = "customer_support"
+
+    txn_type = (matched_txn or {}).get("type")
+    txn_status = (matched_txn or {}).get("status")
+    txn_amount = (matched_txn or {}).get("amount") or 0.0
+
+    if matched_txn is not None:
+        if txn_type == "transfer":
+            if _has_topic(clues, "wrong_number"):
+                case_type = "wrong_transfer"
+                severity = "high"
+                department = "dispute_resolution"
+                reason_codes.append("wrong_transfer")
+            elif _has_topic(clues, "refund"):
+                case_type = "refund_request"
+                severity = "low"
+                department = "customer_support"
+                reason_codes.append("refund_request")
+            else:
+                case_type = "refund_request"
+                severity = "low"
+                department = "customer_support"
+                reason_codes.append("generic_transfer")
+
+        elif txn_type == "payment":
+            if txn_status in {"failed", "pending"} or _has_status_claim(clues, "deducted"):
+                case_type = "payment_failed"
+                severity = "high"
+                department = "payments_ops"
+                reason_codes.append("payment_failed")
+            elif _has_topic(clues, "duplicate"):
+                case_type = "duplicate_payment"
+                severity = "high"
+                department = "payments_ops"
+                reason_codes.append("duplicate_payment")
+            elif _has_topic(clues, "settlement"):
+                case_type = "merchant_settlement_delay"
+                severity = "medium"
+                department = "merchant_operations"
+                reason_codes.append("settlement_delay")
+            else:
+                case_type = "payment_failed"
+                severity = "high"
+                department = "payments_ops"
+                reason_codes.append("payment_review")
+
+        elif txn_type == "cash_in":
+            if _has_topic(clues, "agent_cash_in") or _has_status_claim(clues, "not_received"):
+                case_type = "agent_cash_in_issue"
+                severity = "high"
+                department = "agent_operations"
+                reason_codes.append("agent_cash_in")
+            else:
+                case_type = "agent_cash_in_issue"
+                severity = "medium"
+                department = "agent_operations"
+                reason_codes.append("cash_in_review")
+
+        elif txn_type == "settlement":
+            case_type = "merchant_settlement_delay"
+            severity = "medium"
+            department = "merchant_operations"
+            reason_codes.append("settlement_delay")
+
+        elif txn_type == "refund":
+            case_type = "refund_request"
+            severity = "low"
+            department = "customer_support"
+            reason_codes.append("refund_txn")
+
+        elif txn_type == "cash_out":
+            case_type = "other"
+            severity = "low"
+            department = "customer_support"
+            reason_codes.append("cash_out_review")
+
+    else:
+        if _has_topic(clues, "wrong_number"):
+            case_type = "wrong_transfer"
+            severity = "high"
+            department = "dispute_resolution"
+            reason_codes.append("wrong_transfer_no_match")
+        elif _has_topic(clues, "refund"):
+            case_type = "refund_request"
+            severity = "low"
+            department = "customer_support"
+            reason_codes.append("refund_request_no_match")
+        elif _has_topic(clues, "duplicate"):
+            case_type = "duplicate_payment"
+            severity = "high"
+            department = "payments_ops"
+            reason_codes.append("duplicate_no_match")
+        elif _has_topic(clues, "settlement"):
+            case_type = "merchant_settlement_delay"
+            severity = "medium"
+            department = "merchant_operations"
+            reason_codes.append("settlement_no_match")
+        elif _has_topic(clues, "agent_cash_in"):
+            case_type = "agent_cash_in_issue"
+            severity = "high"
+            department = "agent_operations"
+            reason_codes.append("agent_cash_in_no_match")
+        elif _has_status_claim(clues, "deducted") or _has_status_claim(clues, "failed"):
+            case_type = "payment_failed"
+            severity = "high"
+            department = "payments_ops"
+            reason_codes.append("status_claim_no_match")
+        else:
+            case_type = "other"
+            severity = "low"
+            department = "customer_support"
+            reason_codes.append("no_match")
+
+    if txn_amount and txn_amount > 50_000 and severity != "critical":
+        severity = _bump_severity(severity, 1)
+        reason_codes.append("severity_boost_high_value")
+    if user_type == "merchant" and case_type == "merchant_settlement_delay" and severity == "low":
+        severity = "medium"
+        reason_codes.append("severity_boost_merchant")
+
+    human_review = False
+    if severity == "critical":
+        human_review = True
+        reason_codes.append("human_review_critical")
+    elif severity == "high" and verdict_label != "consistent":
+        human_review = True
+        reason_codes.append("human_review_high_uncertain")
+    if verdict_label == "inconsistent":
+        human_review = True
+        reason_codes.append("human_review_inconsistent")
+    if verdict_label == "insufficient_data" and case_type in {"wrong_transfer", "duplicate_payment"}:
+        human_review = True
+        reason_codes.append("human_review_high_risk_uncertain")
+    # Wrong-transfer is a high-impact financial event — always require a human
+    # reviewer to authorise any reversal, even when the evidence is consistent.
+    if case_type == "wrong_transfer":
+        human_review = True
+        reason_codes.append("human_review_wrong_transfer")
+    if confidence < 0.7:
+        human_review = True
+        reason_codes.append("human_review_low_confidence")
+
+    return Classification(
+        case_type=case_type,
+        severity=severity,
+        department=department,
+        human_review_required=human_review,
+        reason_codes=reason_codes,
+    )

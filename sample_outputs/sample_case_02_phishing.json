@@ -1,0 +1,27 @@
+{
+  "request": {
+    "ticket_id": "T-2026-0002",
+    "complaint": "Someone called saying they are bKash support and asked for my OTP and PIN to verify my account. Please help.",
+    "language": "en",
+    "user_type": "customer",
+    "transaction_history": []
+  },
+  "response": {
+    "ticket_id": "T-2026-0002",
+    "relevant_transaction_id": null,
+    "evidence_verdict": "insufficient_data",
+    "case_type": "phishing_or_social_engineering",
+    "severity": "critical",
+    "department": "fraud_risk",
+    "agent_summary": "Customer appears to have been contacted by a fraudster requesting sensitive credentials. This is a critical fraud-risk case.",
+    "recommended_next_action": "Immediately escalate to fraud_risk, advise customer to secure their account, and block any further outbound transactions pending review.",
+    "customer_reply": "Thank you for reporting this. We take fraud very seriously. Our fraud-risk team will contact you through official channels only and guide you on securing your account. Please do not share your PIN, OTP, or password with anyone. bKash will never ask for these.",
+    "human_review_required": true,
+    "confidence": 0.55,
+    "reason_codes": [
+      "phishing_keywords",
+      "human_review",
+      "evidence_insufficient"
+    ]
+  }
+}
