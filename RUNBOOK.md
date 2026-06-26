@@ -1,194 +1,137 @@
-# RUNBOOK — QueueStorm Investigator
+# QueueStorm Investigator Runbook
 
-Operational guide for judges and operators. Covers local development, Docker
-deployment, Render free-tier deployment, and the Poridhi Lab deployment used
-for the **bKash SUST CSE Carnival 2026** preliminary round.
-
----
-
-## 0. Prerequisites
-
-| Tool       | Tested version | Notes                                   |
-|------------|---------------|------------------------------------------|
-| Python     | 3.11          | Anything ≥ 3.10 should work             |
-| Docker     | 24.x          | Optional — only for container deploys    |
-| git        | 2.40+         |                                          |
-| curl       | any           | For smoke tests                          |
-
-Optional:
-- A free Google AI Studio key (`https://aistudio.google.com/app/apikey`) for
-  the LLM fallback. **Without it the service still works** — it just runs
-  rules-only.
-
----
-
-## 1. Local development (fastest path)
+## 1. Fast local verification
 
 ```bash
-# from the repo root
-cd queuestorm-investigator
 python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # macOS / Linux
-
+source .venv/bin/activate       # Windows PowerShell: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-copy .env.example .env          # Windows
-# cp .env.example .env          # macOS / Linux
-
-# (optional) edit .env to paste GEMINI_API_KEY=...
-
-uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+pytest -q
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Smoke test:
+In a second terminal:
 
 ```bash
 curl http://127.0.0.1:8000/health
-# -> {"status":"ok"}
+```
 
+Expected:
+
+```json
+{"status":"ok"}
+```
+
+Run a sample request:
+
+```bash
 curl -X POST http://127.0.0.1:8000/analyze-ticket \
-     -H "Content-Type: application/json" \
-     -d @sample_outputs/sample_case_01.json
+  -H "Content-Type: application/json" \
+  -d '{
+    "ticket_id":"TKT-SMOKE-01",
+    "complaint":"I paid 1200 taka for mobile recharge but it failed and my balance was deducted.",
+    "language":"en",
+    "transaction_history":[{
+      "transaction_id":"TXN-SMOKE-01",
+      "timestamp":"2026-04-14T16:00:00Z",
+      "type":"payment",
+      "amount":1200,
+      "counterparty":"MERCHANT-MOBILE-OP",
+      "status":"failed"
+    }]
+  }'
 ```
 
-Tests:
+## 2. Docker build and run
 
 ```bash
-python -m pytest                # 36 passed in ~1s
+docker build -t queuestorm-investigator:latest .
+docker run --rm -p 8000:8000 --name queuestorm queuestorm-investigator:latest
 ```
 
----
-
-## 2. Docker (local container)
-
-```bash
-docker build -t queuestorm-investigator:dev .
-docker run --rm -p 8000:8000 --env-file .env queuestorm-investigator:dev
-```
-
-Image size should be **< 250 MB** (`docker images queuestorm-investigator:dev`).
-
-Smoke test (in another terminal):
+Verify from the host:
 
 ```bash
 curl http://127.0.0.1:8000/health
-curl -X POST http://127.0.0.1:8000/analyze-ticket \
-     -H "Content-Type: application/json" \
-     -d @sample_outputs/sample_case_01.json
 ```
 
----
+The API must bind to `0.0.0.0`, which the Dockerfile already configures.
 
-## 3. Render (free web service)
+## 3. DockerHub fallback
 
-The repo ships a `render.yaml` Blueprint that Render can auto-detect.
-
-1. Push this repo to GitHub.
-2. In Render: **New → Blueprint → connect the repo**.
-3. Render reads `render.yaml` and provisions a `free` Docker web service named
-   `queuestorm-investigator`.
-4. In the dashboard, set `GEMINI_API_KEY` to your free Google AI Studio key
-   (optional; service works without it).
-5. Wait for the first deploy (~3 min on the free plan because of the cold
-   build). Once live, Render exposes `https://queuestorm-investigator.onrender.com`.
-
-Smoke test:
+Replace `YOUR_DOCKERHUB_USERNAME`:
 
 ```bash
-curl https://queuestorm-investigator.onrender.com/health
-curl -X POST https://queuestorm-investigator.onrender.com/analyze-ticket \
-     -H "Content-Type: application/json" \
-     -d @sample_outputs/sample_case_01.json
+docker tag queuestorm-investigator:latest YOUR_DOCKERHUB_USERNAME/queuestorm-investigator:latest
+docker push YOUR_DOCKERHUB_USERNAME/queuestorm-investigator:latest
 ```
 
-> Free plan note: the instance spins down after 15 min idle. First request
-> after idle takes ~30 s (cold start). Subsequent requests are instant.
-
----
-
-## 4. Poridhi Lab (primary deployment target for the carnival)
-
-Poridhi Lab is the deployment sandbox used during the hackathon. The image is
-hosted on Docker Hub and exposed publicly through Poridhi's edge.
-
-### 4.1 Build and push the image
+Judge-side/runbook command:
 
 ```bash
-# from repo root
-docker build -t <your-dockerhub-username>/queuestorm-investigator:1.0.0 .
-docker push <your-dockerhub-username>/queuestorm-investigator:1.0.0
+docker pull YOUR_DOCKERHUB_USERNAME/queuestorm-investigator:latest
+docker run --rm -p 8000:8000 YOUR_DOCKERHUB_USERNAME/queuestorm-investigator:latest
 ```
 
-### 4.2 Launch on Poridhi
+## 4. VM deployment with Docker
 
-1. Visit `https://lab.poridhi.io/` and sign in.
-2. **Deploy → Container → Custom Image**.
-3. Image: `docker.io/<your-dockerhub-username>/queuestorm-investigator:1.0.0`
-4. Port: `8000`
-5. Public exposure: **ON**
-6. Environment variables (mirror `.env.example`):
-
-   | Key             | Value              |
-   |-----------------|--------------------|
-   | `PORT`          | `8000`             |
-   | `ENABLE_LLM`    | `true`             |
-   | `GEMINI_API_KEY`| *(your free key)*  |
-   | `LLM_TIMEOUT`   | `8`                |
-   | `LOG_LEVEL`     | `INFO`             |
-
-7. Deploy. Poridhi prints a public URL like
-   `https://<service-id>.lab.poridhi.io`.
-
-### 4.3 Verify
+On a Linux VM with Docker installed:
 
 ```bash
-curl https://<service-id>.lab.poridhi.io/health
-# -> {"status":"ok"}
-
-curl -X POST https://<service-id>.lab.poridhi.io/analyze-ticket \
-     -H "Content-Type: application/json" \
-     -d @sample_outputs/sample_case_01.json
+docker pull YOUR_DOCKERHUB_USERNAME/queuestorm-investigator:latest
+docker rm -f queuestorm 2>/dev/null || true
+docker run -d \
+  --name queuestorm \
+  --restart unless-stopped \
+  -p 8000:8000 \
+  --env PORT=8000 \
+  YOUR_DOCKERHUB_USERNAME/queuestorm-investigator:latest
 ```
 
----
-
-## 5. Failure modes & recovery
-
-| Symptom                                     | Likely cause                | Fix                                  |
-|---------------------------------------------|------------------------------|--------------------------------------|
-| `503` on `/health` after deploy             | Image failed to start        | Check Render/Poridhi logs; confirm `PORT=8000` |
-| `LLM timeout` reason code in response       | Slow Gemini API              | Increase `LLM_TIMEOUT` or set `ENABLE_LLM=false` |
-| `we will refund` / `PIN` appears in output  | Safety sanitizer regression  | Run `python -m pytest tests/test_safety.py` |
-| First request after idle takes 30 s         | Render free-tier cold start  | Expected; warn judges in advance     |
-| `ModuleNotFoundError: app`                  | Running from wrong directory | `cd` into `queuestorm-investigator/` before uvicorn |
-
----
-
-## 6. Rollback
+Health check:
 
 ```bash
-git tag -l                    # find last green tag
-git checkout <last-green-tag>
-docker build -t <user>/queuestorm-investigator:<tag> .
-docker push <user>/queuestorm-investigator:<tag>
-# redeploy on Render / Poridhi with the previous tag
+curl http://127.0.0.1:8000/health
 ```
 
-On Render: **Service → Manual Deploy → pick previous commit**.
+If the VM firewall is enabled, allow the application port only as required by the hosting platform/reverse proxy. Place a TLS-enabled reverse proxy or platform HTTPS endpoint in front of the service for a public submission URL.
 
----
+## 5. Public smoke test
 
-## 7. Security checklist
+After deployment, use the public HTTPS base URL, not localhost:
 
-- [x] Container runs as non-root (`USER app`).
-- [x] No secrets baked into the image; `.env` is excluded by `.dockerignore`.
-- [x] No customer PII (PIN, OTP, full card numbers) ever leaves the sanitizer.
-- [x] LLM only sees structured complaint text + the LLM system prompt; the
-      `customer_reply` is always template-generated locally.
+```bash
+curl https://YOUR_PUBLIC_BASE_URL/health
+curl -X POST https://YOUR_PUBLIC_BASE_URL/analyze-ticket \
+  -H "Content-Type: application/json" \
+  -d @sample_request.json
+```
 
----
+## 6. Optional Gemini hint configuration
 
-## 8. Contact
+This service is fully functional without an external key. Keep this off for the most reliable judging path:
 
-For issues during the carnival, contact the team via the official Discord
-channel pinned by the organizers.
+```env
+ENABLE_LLM=false
+```
+
+If deliberately enabled for a hosted demo, set secrets only in the hosting platform:
+
+```env
+ENABLE_LLM=true
+GEMINI_API_KEY=your_temporary_limited_key
+LLM_TIMEOUT=8
+```
+
+The LLM client is non-authoritative. A missing key, timeout, invalid response, or rate limit results in no hint and does not change the response schema or rules decision.
+
+## 7. Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| `404` | Use exact paths: `/health` and `/analyze-ticket`. |
+| `422` | Check `ticket_id`, non-blank `complaint`, enum spelling, timestamp, and transaction fields. |
+| API not reachable outside VM | Ensure Docker publishes `-p 8000:8000`, VM firewall/security group allows the port, and reverse proxy points to port 8000. |
+| Docker health check fails | Inspect `docker logs queuestorm`; verify the service is bound to `0.0.0.0`. |
+| LLM failure | Disable `ENABLE_LLM`; it is optional and not needed for core triage. |
+| Unsafe wording concern | Run `pytest -q`; all templates pass the credential-request and unauthorized-promise tests. |

@@ -1,57 +1,42 @@
-"""Environment configuration loader.
+"""Runtime configuration for QueueStorm Investigator."""
+from functools import lru_cache
 
-Centralises access to environment variables defined in the PRD.
-Values are loaded once at import time; tests can monkeypatch
-`app.config.settings` to override behaviour.
-"""
-from __future__ import annotations
-
-import logging
-import os
-from dataclasses import dataclass
-from pathlib import Path
-
-from dotenv import load_dotenv
-
-# Load .env if present (no-op in production where env vars are injected).
-_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(_ENV_PATH, override=False)
+from pydantic import AliasChoices, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-@dataclass
-class Settings:
-    port: int
-    enable_llm: bool
-    gemini_api_key: str
-    llm_timeout: float
-    log_level: str
+class Settings(BaseSettings):
+    """Environment-backed configuration with safe offline defaults."""
 
-    @property
-    def llm_enabled(self) -> bool:
-        """LLM is only active if both flag and key are set."""
-        return self.enable_llm and bool(self.gemini_api_key.strip())
+    app_name: str = "QueueStorm Investigator"
+    environment: str = "production"
+    port: int = Field(default=8000, ge=1, le=65535)
+    log_level: str = "INFO"
 
+    # The core service is deliberately rules-first and works with no external key.
+    enable_llm: bool = False
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-2.0-flash"
+    llm_timeout: float = Field(
+        default=8.0,
+        gt=0,
+        le=15,
+        validation_alias=AliasChoices("LLM_TIMEOUT", "LLM_TIMEOUT_SECONDS"),
+    )
 
-def _bool(value: str | None, default: bool) -> bool:
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    # Guardrails for a small, predictable API surface.
+    max_complaint_chars: int = Field(default=6000, ge=100, le=20000)
+    max_transactions: int = Field(default=25, ge=1, le=100)
+    high_value_bdt: float = Field(default=50000.0, ge=0)
 
-
-def load_settings() -> Settings:
-    return Settings(
-        port=int(os.getenv("PORT", "8000")),
-        enable_llm=_bool(os.getenv("ENABLE_LLM"), True),
-        gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
-        llm_timeout=float(os.getenv("LLM_TIMEOUT", "8")),
-        log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
     )
 
 
-settings = load_settings()
-
-logging.basicConfig(
-    level=getattr(logging, settings.log_level, logging.INFO),
-    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-)
-logger = logging.getLogger("queuestorm")
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

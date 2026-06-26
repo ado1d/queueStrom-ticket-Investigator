@@ -1,321 +1,227 @@
 # QueueStorm Investigator
 
-> **Evidence-grounded AI/API copilot for digital finance support tickets.**
-> Built for the **bKash SUST CSE Carnival 2026** (preliminary round, 4.5-hour online hackathon).
+A lightweight, rules-first FastAPI service for safe fintech support-ticket triage. It receives a customer complaint and a short synthetic transaction-history snippet, then returns a structured investigation result for a support agent.
 
-QueueStorm Investigator is a stateless FastAPI service that triages fintech
-support tickets by cross-referencing the customer's complaint text against
-their transaction history. It runs **rules-first** for speed and determinism,
-with an **optional LLM fallback** (Google Gemini 2.0 Flash) for ambiguous or
-Bangla-language complaints. Every response is post-processed by a safety
-sanitizer that strips credentials, rewrites refund promises, and appends a
-mandatory customer-protection suffix.
+This implementation is designed for the **QueueStorm Investigator** preliminary API contract:
 
----
+- `GET /health` returns `{"status":"ok"}`.
+- `POST /analyze-ticket` accepts one ticket and returns the required structured response.
+- It is deterministic, offline-first, container-ready, and does not require a database, GPU, browser UI, or external model for correct core behavior.
 
-## ⚡ TL;DR
+## Why this design
+
+The task is an investigation problem, not a chatbot problem. The service therefore keeps the critical path deterministic:
+
+1. **Validate** the request with Pydantic enums and non-empty semantic checks.
+2. **Strip prompt-injection-like clauses** before analysis.
+3. **Extract evidence** from English, Bangla, and common Banglish wording: amounts, transaction IDs, phone numbers, approximate times, topics, and transaction-status clues.
+4. **Score each supplied transaction** using visible rule weights.
+5. **Refuse to guess** when multiple records are equally plausible.
+6. **Classify and route** using a fixed business-policy decision tree.
+7. **Generate templates from verified fields only**, then apply a final fintech safety filter.
+
+```mermaid
+flowchart LR
+    A[POST /analyze-ticket] --> B[Schema validation]
+    B --> C[Injection-clause filter]
+    C --> D[Evidence extraction]
+    D --> E[Transaction matching and verdict]
+    E --> F[Case classification and routing]
+    F --> G[Template text generation]
+    G --> H[Safety sanitizer]
+    H --> I[Structured JSON response]
+```
+
+## Evidence policy
+
+The transaction matcher uses transparent, deterministic evidence weights:
+
+| Evidence | Score contribution |
+|---|---:|
+| Explicit transaction ID in complaint | +0.85 |
+| Exact amount match | +0.45 |
+| Expected transaction type match | +0.25 |
+| Counterparty/phone match | +0.35 |
+| Approximate hour match | +0.12 |
+| Expected `failed` or `pending` status | +0.16 to +0.20 |
+
+A transaction needs a score of at least `0.50` to be selected. When the leading two candidates are within `0.12` and there is no explicit transaction ID or counterparty match, the service returns:
+
+- `relevant_transaction_id: null`
+- `evidence_verdict: insufficient_data`
+
+This is deliberate: ambiguous evidence must not create the wrong dispute.
+
+## Safety policy
+
+The service never requests PINs, OTPs, passwords, passcodes, or full card numbers. It also does not promise refunds, reversals, recovery, or account unblocking. Replies use conditional language such as:
+
+> Any eligible amount, if approved, will be returned through official channels.
+
+Prompt-like instructions inside a complaint are not treated as trusted instructions. Customer text is never copied into generated replies, so adversarial wording cannot direct the output.
+
+## Models
+
+| Model / approach | Where it runs | Why it is used |
+|---|---|---|
+| Deterministic rules, regex, and policy tree | Local Python process | Fast, reproducible, explainable, and safe without a network/API key. This is the authoritative decision engine. |
+| Optional Gemini language/ambiguity hint | External API, disabled by default | Optional enhancement only. It never selects a transaction, evidence verdict, case type, severity, or department. Any timeout/error fails closed to the local rules path. |
+
+`ENABLE_LLM=false` is the recommended judging configuration. No LLM call is needed for the core API.
+
+## Repository structure
+
+```text
+.
+├── app/
+│   ├── main.py              # FastAPI routes and safe error handlers
+│   ├── schemas.py           # Exact request/response enums and validation
+│   ├── evidence.py          # Clues, matching, ambiguity, evidence verdict
+│   ├── classifier.py        # Case type, severity, department, escalation
+│   ├── text_gen.py          # Facts-only templates
+│   ├── safety.py            # Injection and unsafe-language safeguards
+│   ├── rules_config.py      # Central keyword/policy constants
+│   ├── config.py            # Environment configuration
+│   └── llm_fallback.py      # Optional non-authoritative hint client
+├── tests/
+│   ├── fixtures/public_sample_cases.json
+│   ├── test_schema.py
+│   ├── test_reasoning.py
+│   ├── test_safety.py
+│   └── test_determinism.py
+├── sample_outputs/sample_case_01.json
+├── Dockerfile
+├── requirements.txt
+├── .env.example
+├── README.md
+└── RUNBOOK.md
+```
+
+## Local run
+
+### Prerequisites
+
+- Python 3.11+
+- Docker (optional)
+
+### Python
 
 ```bash
-git clone <repo-url> queuestorm-investigator
-cd queuestorm-investigator
+python -m venv .venv
+# Linux/macOS
+source .venv/bin/activate
+# Windows PowerShell
+# .venv\Scripts\Activate.ps1
+
 pip install -r requirements.txt
-copy .env.example .env       # paste GEMINI_API_KEY if you have one
-uvicorn app.main:app --host 127.0.0.1 --port 8000
-# in another terminal
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Verify:
+
+```bash
 curl http://127.0.0.1:8000/health
-curl -X POST http://127.0.0.1:8000/analyze-ticket -H "Content-Type: application/json" -d @sample_outputs/sample_case_01.json
+# {"status":"ok"}
 ```
 
----
+### Docker
 
-## 🏗️ Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    POST /analyze-ticket                     │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 1.  Evidence engine (rules-only)                            │
-│     • extract_clues (bilingual EN / BN / Banglish regex)    │
-│     • score_transactions + match_transaction                │
-│     • verdict + compute_confidence                         │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 2.  LLM fallback (conditional, optional)                    │
-│     • Triggers on low-confidence OR Bangla/mixed            │
-│     • Uses Gemini 2.0 Flash via REST                        │
-│     • 8 s timeout · 1 retry · strict JSON-only prompt       │
-│     • LLM may surface a candidate txn id / contradiction    │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 3.  Classifier (decision tree)                              │
-│     • Phishing check runs FIRST → always routes to fraud    │
-│     • Maps (txn_type, status, topics) → (case, severity,    │
-│       department)                                           │
-│     • Severity boosts for high-value + merchant             │
-│     • Human-review rules: critical, inconsistent,           │
-│       high-risk+uncertain, wrong_transfer, low-confidence   │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 4.  Text generation (template-only — LLM NEVER writes the   │
-│     customer_reply)                                         │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│ 5.  Safety sanitizer                                        │
-│     • strip_prompt_injection                                │
-│     • scrub_forbidden (PIN/OTP/redact + refund rewrites)    │
-│     • append_safety_suffix                                  │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                       AnalyzeResponse (JSON)
+```bash
+docker build -t queuestorm-investigator:latest .
+docker run --rm -p 8000:8000 --env-file .env queuestorm-investigator:latest
 ```
 
----
+The image runs as a non-root user and has no large model download.
 
-## 📡 Endpoints
+## API reference
 
 ### `GET /health`
 
-Liveness probe used by Render, Poridhi, and judges.
+**Response**
 
 ```json
-{ "status": "ok" }
-```
-
-### `GET /`
-
-Service metadata + LLM status flag.
-
-```json
-{
-  "service": "queuestorm-investigator",
-  "version": "1.0.0",
-  "endpoints": ["GET /health", "POST /analyze-ticket"],
-  "llm_enabled": true
-}
+{"status":"ok"}
 ```
 
 ### `POST /analyze-ticket`
 
-Full triage pipeline. See `sample_outputs/sample_case_01.json` for a
-realistic request/response pair.
-
-**Request** (`application/json`):
-
-| Field               | Type           | Required | Notes                                  |
-|---------------------|----------------|----------|----------------------------------------|
-| `ticket_id`         | string         | ✓        | Caller-supplied                        |
-| `complaint`         | string         | ✓        | Non-empty after trim                   |
-| `language`          | enum           | ✗        | `en` / `bn` / `mixed`                  |
-| `channel`           | enum           | ✗        | `in_app_chat` / `call_center` / ...    |
-| `user_type`         | enum           | ✗        | `customer` / `merchant` / `agent` ...  |
-| `campaign_context`  | string         | ✗        | Optional tag                           |
-| `transaction_history` | array<object> | ✗        | See schema below                       |
-| `metadata`          | object         | ✗        | Free-form                              |
-
-**Transaction entry**:
+**Example request**
 
 ```json
 {
-  "transaction_id": "TXN-9101",
-  "timestamp": "2026-01-15T14:32:00",
-  "type": "transfer",        // transfer | payment | cash_in | cash_out | settlement | refund
-  "amount": 5000.00,
-  "counterparty": "01712345678",
-  "status": "completed"       // completed | failed | pending | reversed
+  "ticket_id": "TKT-001",
+  "complaint": "I sent 5000 taka to a wrong number around 2pm today.",
+  "language": "en",
+  "channel": "in_app_chat",
+  "user_type": "customer",
+  "transaction_history": [
+    {
+      "transaction_id": "TXN-9101",
+      "timestamp": "2026-04-14T14:08:22Z",
+      "type": "transfer",
+      "amount": 5000,
+      "counterparty": "+8801719876543",
+      "status": "completed"
+    }
+  ]
 }
 ```
 
-**Response**:
+**Example response**
 
-| Field                     | Type                | Notes                                       |
-|---------------------------|---------------------|---------------------------------------------|
-| `ticket_id`               | string              | Echoed from request                         |
-| `relevant_transaction_id` | string \| null      | Best-match transaction id, or null          |
-| `evidence_verdict`        | enum                | `consistent` / `inconsistent` / `insufficient_data` |
-| `case_type`               | enum                | 8 values (see PRD §10)                      |
-| `severity`                | enum                | `low` / `medium` / `high` / `critical`      |
-| `department`              | enum                | 6 values                                    |
-| `agent_summary`           | string              | One-paragraph summary (safe)                |
-| `recommended_next_action` | string              | Next step for the agent                     |
-| `customer_reply`          | string              | Always ends with the safety suffix          |
-| `human_review_required`   | bool                | True for critical / high-risk cases         |
-| `confidence`              | number (0..1)       | Heuristic + LLM-boosted                     |
-| `reason_codes`            | array<string>       | Audit trail                                 |
+```json
+{
+  "ticket_id": "TKT-001",
+  "relevant_transaction_id": "TXN-9101",
+  "evidence_verdict": "consistent",
+  "case_type": "wrong_transfer",
+  "severity": "high",
+  "department": "dispute_resolution",
+  "agent_summary": "Customer reports a possible wrong-recipient transfer of 5,000 BDT linked to TXN-9101. Available transaction data matches the reported amount and transfer context.",
+  "recommended_next_action": "Route TXN-9101 to dispute_resolution to verify the recipient and transaction context under the applicable dispute policy; do not promise an outcome.",
+  "customer_reply": "We have noted your concern about transaction TXN-9101. Our dispute team will review the available details under the applicable policy. We cannot confirm the outcome until the review is complete. Please do not share your PIN, OTP, password, or full card number with anyone.",
+  "human_review_required": true,
+  "confidence": 0.9,
+  "reason_codes": ["amount_match", "transaction_type_match", "time_match", "wrong_transfer", "transaction_match", "dispute_initiated"]
+}
+```
 
-**Error codes**:
+## Environment variables
 
-- `400` — invalid JSON or schema mismatch (Pydantic)
-- `422` — schema valid but `complaint` is empty after trim
-- `500` — internal error; generic message, no internals leaked
+| Name | Default | Purpose |
+|---|---:|---|
+| `PORT` | `8000` | Uvicorn port. |
+| `LOG_LEVEL` | `INFO` | Runtime logging level. |
+| `HIGH_VALUE_BDT` | `50000` | Amount threshold that requires human review. |
+| `ENABLE_LLM` | `false` | Enables the optional non-authoritative Gemini hint path. |
+| `GEMINI_API_KEY` | empty | Only needed when `ENABLE_LLM=true`. Never commit it. |
+| `GEMINI_MODEL` | `gemini-2.0-flash` | Optional Gemini model name. |
+| `LLM_TIMEOUT` | `8` | Bound for optional LLM calls. |
 
----
+Use `.env.example` as a template. The default configuration needs no secret.
 
-## 🛡️ Safety guarantees
-
-These are enforced by `app/safety.py` and verified by `tests/test_safety.py`:
-
-1. **Credential redaction**: PIN, OTP, password, secret code, full card
-   numbers (16-digit), CVC/CVV are matched by regex and replaced with
-   `[redacted]`.
-2. **Prompt-injection stripping**: phrases like "ignore previous
-   instructions", "disregard the system", "you are now a ...", `system:`,
-   `<|...|>`, `### instruction` are removed from inputs before any text
-   generation.
-3. **Refund-promise rewrite**: "we will refund", "we'll refund", "we have
-   refunded", "your money will be reversed" become "any eligible adjustment
-   will be processed" — never a guaranteed refund.
-4. **Account-unblock rewrite**: "account will be unblocked" becomes "account
-   access will be reviewed".
-5. **Mandatory suffix**: every `customer_reply` ends with:
-   > *"Please do not share your PIN, OTP, or password with anyone. Our team
-   > will never ask for these."*
-6. **LLM isolation**: the LLM only sees a structured prompt asking for JSON
-   `{"relevant_txn_id","case_type","contradiction","amount","counterparty_hint"}`.
-   It never writes the customer-facing reply.
-7. **No PII echo**: 16-digit card numbers are matched and redacted before
-   the response is returned.
-
----
-
-## 🤖 AI usage disclosure
-
-Per the hackathon's transparency rule:
-
-- **Provider**: Google Gemini 2.0 Flash (free tier).
-- **Trigger**: the LLM is **only** invoked when **both** (a) `ENABLE_LLM=true`
-  AND `GEMINI_API_KEY` is set, AND (b) the rules engine returns a low
-  confidence (Bangla/mixed AND confidence < 0.7, OR no transaction match AND
-  confidence < 0.5).
-- **What it sees**: the complaint text, a structured list of recent
-  transactions, and a strict system prompt requesting JSON only.
-- **What it produces**: a small JSON blob of extracted facts. It does **not**
-  generate the `customer_reply`, `agent_summary`, or
-  `recommended_next_action` — those are always template-generated.
-- **Failure handling**: timeouts, HTTP errors, JSON parse errors, and
-  schema-invalid responses all degrade gracefully (the rules-only result is
-  used). Failures are logged but never bubble up to the caller.
-
----
-
-## 🚀 Deployment
-
-The repo ships three deployment targets. See [`RUNBOOK.md`](./RUNBOOK.md)
-for the full operator guide.
-
-| Target          | Use case                              | One-liner                                                              |
-|-----------------|---------------------------------------|------------------------------------------------------------------------|
-| **Local**       | Development, smoke test               | `uvicorn app.main:app --reload`                                        |
-| **Docker**      | Reproducible container                | `docker build -t qsi . && docker run --rm -p 8000:8000 --env-file .env qsi` |
-| **Render**      | Public demo URL, free tier            | Connect repo → Render reads `render.yaml` → done                      |
-| **Poridhi Lab** | **Primary hackathon deployment**      | Push image to Docker Hub → launch on Poridhi with env vars             |
-
----
-
-## ⚙️ Environment variables
-
-Copy `.env.example` to `.env` and fill in what you need.
-
-| Key             | Default | Description                                        |
-|-----------------|---------|----------------------------------------------------|
-| `PORT`          | `8000`  | uvicorn listen port (Render/Poridhi require `8000`) |
-| `ENABLE_LLM`    | `true`  | Master switch for Gemini fallback                  |
-| `GEMINI_API_KEY`| *(empty)* | Free key from aistudio.google.com                |
-| `LLM_TIMEOUT`   | `8`     | Per-request timeout in seconds                     |
-| `LOG_LEVEL`     | `INFO`  | `DEBUG` / `INFO` / `WARNING` / `ERROR`             |
-
-The service runs without `GEMINI_API_KEY` — it just becomes rules-only.
-
----
-
-## 🧪 Testing
+## Test
 
 ```bash
-python -m pytest
-# 36 passed in ~1 s
+pytest -q
 ```
 
-The test suite covers:
+The suite checks:
 
-- **Schema validation**: health, root, malformed payloads, empty complaint.
-- **Reasoning**: all 10 PRD sample cases end-to-end through the live API,
-  plus targeted assertions on phishing override, severity boosts, Bangla
-  routing, and insufficient-data handling.
-- **Safety**: suffix append, forbidden-phrase scrub, prompt-injection strip,
-  credential leak prevention, refund-promise rewrite, card-number scrub.
-- **LLM fallback**: JSON extraction, garbage handling, enum validation,
-  amount coercion, disabled-mode short-circuit, timeout fallback.
+- health and schema/enum handling;
+- all 10 supplied public samples against their evidence, classification, routing, severity, and escalation expectations;
+- bilingual cash-in and phishing handling;
+- malformed/blank requests;
+- safe replies and resistance to prompt-injection text;
+- deterministic output even when transaction history order is shuffled.
 
-LLM tests use mocked `httpx` clients — **no real API calls during tests**.
+## Deployment
 
----
+See [RUNBOOK.md](RUNBOOK.md) for a Docker-first deployment guide. A public HTTPS URL is the preferred submission path; a Docker image/run command is the fallback path.
 
-## 📂 Repo layout
+## Known limitations
 
-```
-queuestorm-investigator/
-├── app/
-│   ├── classifier.py        # phishing-first decision tree + severity boosts
-│   ├── config.py            # env loader (single Settings instance)
-│   ├── evidence.py          # clue extraction + scoring + verdict + confidence
-│   ├── llm_fallback.py      # httpx Gemini client (async, retry, JSON-validate)
-│   ├── main.py              # FastAPI app: /health, /analyze-ticket, /
-│   ├── pipeline.py          # orchestrator: evidence → LLM → classify → text → safety
-│   ├── rules_config.py      # bilingual regex + keyword dicts + blocklists
-│   ├── safety.py            # sanitizer: strip / scrub / rewrite / suffix
-│   ├── schemas.py           # Pydantic models + Literal enums
-│   └── text_gen.py          # per-case-type template dict
-├── tests/
-│   ├── conftest.py          # disable_llm autouse fixture + 10-case fixture
-│   ├── fixtures/
-│   │   └── sample_cases.json
-│   ├── test_schema.py
-│   ├── test_reasoning.py
-│   ├── test_safety.py
-│   └── test_llm_fallback.py
-├── sample_outputs/
-│   ├── sample_case_01.json            # wrong_transfer (English)
-│   ├── sample_case_02_phishing.json   # phishing_or_social_engineering
-│   └── sample_case_03_payment_failed.json
-├── Dockerfile                # multi-stage python:3.11-slim, non-root, < 250 MB
-├── render.yaml               # Render Blueprint
-├── RUNBOOK.md                # full deployment + ops guide
-├── requirements.txt
-├── .env.example
-├── .dockerignore
-├── pytest.ini
-└── README.md                 # ← you are here
-```
-
----
-
-## ⚠️ Known limitations
-
-- **Single language pair**: regex covers English + Bangla + Banglish; other
-  languages fall through to the LLM if enabled, otherwise `other`.
-- **No persistence**: the service is stateless. Ticket history, agent
-  decisions, and audit logs are expected to live in the caller's system.
-- **Free-tier LLM**: Gemini 2.0 Flash rate limits apply; for production
-  load, swap `app/llm_fallback.py` for a paid endpoint or a local model.
-- **Render cold start**: the free tier spins down after 15 min idle. First
-  request after idle takes ~30 s.
-- **No transaction signing**: `transaction_history` is trusted as-is. In a
-  real deployment, sign or HMAC these entries at the edge.
-
----
-
-## 📜 License & credits
-
-Built in 4.5 hours by Team **QueueStorm** for the **bKash SUST CSE Carnival
-2026**. MIT for the source; please credit if you reuse the templates.
+- This is a synthetic-data support copilot, not a real payment-system integration.
+- It does not query a ledger, initiate financial action, or authoritatively determine whether a balance was debited.
+- Keyword-based Bangla/Banglish support covers high-signal operational phrases, not every dialect or misspelling.
+- A real production rollout would add authenticated access, structured telemetry, immutable audit storage, monitoring, policy versioning, and a human-agent review UI.

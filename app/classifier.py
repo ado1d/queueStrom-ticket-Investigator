@@ -1,254 +1,123 @@
-"""Case classifier + routing decision tree.
-
-Implements PRD section 11.4. Phishing detection runs FIRST so we never
-route a scam complaint into the wrong queue. Severity boosts and
-human_review rules are centralised here.
-"""
+"""Deterministic case classification, routing, escalation, and severity policy."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
 
-from .evidence import Clues
+from app.config import Settings
+from app.evidence import EvidenceResult
+from app.rules_config import DEPARTMENT_BY_CASE
+from app.schemas import (
+    AnalyzeTicketRequest,
+    CaseType,
+    Department,
+    EvidenceVerdict,
+    Severity,
+    TransactionStatus,
+    TransactionType,
+)
 
 
-@dataclass
+@dataclass(slots=True)
 class Classification:
-    case_type: str
-    severity: str
-    department: str
+    case_type: CaseType
+    severity: Severity
+    department: Department
     human_review_required: bool
-    reason_codes: List[str]
-
-    def to_dict(self) -> Dict:
-        return {
-            "case_type": self.case_type,
-            "severity": self.severity,
-            "department": self.department,
-            "human_review_required": self.human_review_required,
-            "reason_codes": list(self.reason_codes),
-        }
 
 
-_SEVERITY_ORDER = ["low", "medium", "high", "critical"]
-
-# When the LLM overrides the rules-based case_type, look up the canonical
-# (severity, department) pair from this table. Keeps the override deterministic.
-_LLM_ROUTE: Dict[str, tuple] = {
-    "wrong_transfer": ("high", "dispute_resolution"),
-    "payment_failed": ("high", "payments_ops"),
-    "refund_request": ("low", "customer_support"),
-    "duplicate_payment": ("high", "payments_ops"),
-    "merchant_settlement_delay": ("medium", "merchant_operations"),
-    "agent_cash_in_issue": ("high", "agent_operations"),
-    "phishing_or_social_engineering": ("critical", "fraud_risk"),
-    "other": ("low", "customer_support"),
-}
+def _is_high_value(amount: float | None, settings: Settings) -> bool:
+    return amount is not None and amount >= settings.high_value_bdt
 
 
-def _bump_severity(severity: str, levels: int = 1) -> str:
-    try:
-        idx = _SEVERITY_ORDER.index(severity)
-    except ValueError:
-        idx = 0
-    return _SEVERITY_ORDER[min(idx + levels, len(_SEVERITY_ORDER) - 1)]
+def _select_case_type(request: AnalyzeTicketRequest, evidence: EvidenceResult) -> CaseType:
+    topics = evidence.clues.topics
+    txn = evidence.relevant_transaction
+
+    # Safety-sensitive social engineering is intentionally first and absolute.
+    if "phishing" in topics:
+        return CaseType.phishing_or_social_engineering
+    if "duplicate_payment" in topics or evidence.duplicate_pair is not None:
+        return CaseType.duplicate_payment
+    if "agent_cash_in" in topics or (txn and txn.type == TransactionType.cash_in and "agent" in topics):
+        return CaseType.agent_cash_in_issue
+    if "merchant_settlement" in topics or (
+        txn and txn.type == TransactionType.settlement and request.user_type and request.user_type.value == "merchant"
+    ):
+        return CaseType.merchant_settlement_delay
+    if "payment_failed" in topics or (txn and txn.type == TransactionType.payment and txn.status == TransactionStatus.failed):
+        return CaseType.payment_failed
+    # A wrong-recipient or transfer-nonreceipt allegation takes precedence over a
+    # generic request to "reverse" or "refund" the same transfer.
+    if "wrong_transfer" in topics or "transfer_nonreceipt" in topics:
+        return CaseType.wrong_transfer
+    if "refund_request" in topics:
+        return CaseType.refund_request
+    if txn and txn.type == TransactionType.transfer and "transfer" in topics:
+        return CaseType.wrong_transfer
+    return CaseType.other
 
 
-def _has_topic(clues: Clues, name: str) -> bool:
-    return name in clues.topics
+def _select_severity(
+    case_type: CaseType,
+    evidence: EvidenceResult,
+    settings: Settings,
+) -> Severity:
+    txn = evidence.relevant_transaction
+    amount = txn.amount if txn else (evidence.clues.amounts[0] if evidence.clues.amounts else None)
+
+    if case_type == CaseType.phishing_or_social_engineering:
+        return Severity.critical
+    if _is_high_value(amount, settings):
+        return Severity.high
+    if case_type == CaseType.duplicate_payment:
+        return Severity.high
+    if case_type == CaseType.agent_cash_in_issue:
+        return Severity.high if txn and txn.status == TransactionStatus.pending else Severity.medium
+    if case_type == CaseType.payment_failed:
+        return Severity.high if txn and txn.status == TransactionStatus.failed else Severity.medium
+    if case_type == CaseType.wrong_transfer:
+        if evidence.ambiguous or evidence.verdict == EvidenceVerdict.inconsistent:
+            return Severity.medium
+        return Severity.high if txn is not None else Severity.medium
+    if case_type == CaseType.merchant_settlement_delay:
+        return Severity.medium
+    if case_type == CaseType.refund_request:
+        return Severity.low
+    return Severity.low
 
 
-def _has_status_claim(clues: Clues, name: str) -> bool:
-    return clues.status_claim == name
+def _requires_human_review(
+    case_type: CaseType,
+    evidence: EvidenceResult,
+    severity: Severity,
+    settings: Settings,
+) -> bool:
+    txn = evidence.relevant_transaction
+    amount = txn.amount if txn else (evidence.clues.amounts[0] if evidence.clues.amounts else None)
+
+    if case_type == CaseType.phishing_or_social_engineering:
+        return True
+    if evidence.verdict == EvidenceVerdict.inconsistent:
+        return True
+    if _is_high_value(amount, settings):
+        return True
+    if case_type in {CaseType.duplicate_payment, CaseType.agent_cash_in_issue}:
+        return True
+    # A confirmed wrong-transfer dispute is escalated.  A low-information,
+    # ambiguous transfer instead asks for clarification first (public sample 08).
+    if case_type == CaseType.wrong_transfer and txn is not None and not evidence.ambiguous:
+        return True
+    return False
 
 
-def classify(
-    clues: Clues,
-    verdict_label: str,
-    matched_txn: Optional[Dict],
-    user_type: Optional[str] = None,
-    confidence: float = 1.0,
-    llm_case_type: Optional[str] = None,
-) -> Classification:
-    reason_codes: List[str] = []
-
-    # 0. Phishing wins always.
-    if _has_topic(clues, "phishing"):
-        reason_codes.append("phishing_keywords")
-        reason_codes.append("human_review")
-        return Classification(
-            case_type="phishing_or_social_engineering",
-            severity="critical",
-            department="fraud_risk",
-            human_review_required=True,
-            reason_codes=reason_codes,
-        )
-
-    case_type = "other"
-    severity = "low"
-    department = "customer_support"
-
-    txn_type = (matched_txn or {}).get("type")
-    txn_status = (matched_txn or {}).get("status")
-    txn_amount = (matched_txn or {}).get("amount") or 0.0
-
-    if matched_txn is not None:
-        if txn_type == "transfer":
-            if _has_topic(clues, "wrong_number"):
-                case_type = "wrong_transfer"
-                severity = "high"
-                department = "dispute_resolution"
-                reason_codes.append("wrong_transfer")
-            elif _has_topic(clues, "refund"):
-                case_type = "refund_request"
-                severity = "low"
-                department = "customer_support"
-                reason_codes.append("refund_request")
-            else:
-                case_type = "refund_request"
-                severity = "low"
-                department = "customer_support"
-                reason_codes.append("generic_transfer")
-
-        elif txn_type == "payment":
-            if txn_status in {"failed", "pending"} or _has_status_claim(clues, "deducted"):
-                case_type = "payment_failed"
-                severity = "high"
-                department = "payments_ops"
-                reason_codes.append("payment_failed")
-            elif _has_topic(clues, "duplicate"):
-                case_type = "duplicate_payment"
-                severity = "high"
-                department = "payments_ops"
-                reason_codes.append("duplicate_payment")
-            elif _has_topic(clues, "settlement"):
-                case_type = "merchant_settlement_delay"
-                severity = "medium"
-                department = "merchant_operations"
-                reason_codes.append("settlement_delay")
-            else:
-                case_type = "payment_failed"
-                severity = "high"
-                department = "payments_ops"
-                reason_codes.append("payment_review")
-
-        elif txn_type == "cash_in":
-            if _has_topic(clues, "agent_cash_in") or _has_status_claim(clues, "not_received"):
-                case_type = "agent_cash_in_issue"
-                severity = "high"
-                department = "agent_operations"
-                reason_codes.append("agent_cash_in")
-            else:
-                case_type = "agent_cash_in_issue"
-                severity = "medium"
-                department = "agent_operations"
-                reason_codes.append("cash_in_review")
-
-        elif txn_type == "settlement":
-            case_type = "merchant_settlement_delay"
-            severity = "medium"
-            department = "merchant_operations"
-            reason_codes.append("settlement_delay")
-
-        elif txn_type == "refund":
-            case_type = "refund_request"
-            severity = "low"
-            department = "customer_support"
-            reason_codes.append("refund_txn")
-
-        elif txn_type == "cash_out":
-            case_type = "other"
-            severity = "low"
-            department = "customer_support"
-            reason_codes.append("cash_out_review")
-
-    else:
-        if _has_topic(clues, "wrong_number"):
-            case_type = "wrong_transfer"
-            severity = "high"
-            department = "dispute_resolution"
-            reason_codes.append("wrong_transfer_no_match")
-        elif _has_topic(clues, "refund"):
-            case_type = "refund_request"
-            severity = "low"
-            department = "customer_support"
-            reason_codes.append("refund_request_no_match")
-        elif _has_topic(clues, "duplicate"):
-            case_type = "duplicate_payment"
-            severity = "high"
-            department = "payments_ops"
-            reason_codes.append("duplicate_no_match")
-        elif _has_topic(clues, "settlement"):
-            case_type = "merchant_settlement_delay"
-            severity = "medium"
-            department = "merchant_operations"
-            reason_codes.append("settlement_no_match")
-        elif _has_topic(clues, "agent_cash_in"):
-            case_type = "agent_cash_in_issue"
-            severity = "high"
-            department = "agent_operations"
-            reason_codes.append("agent_cash_in_no_match")
-        elif _has_status_claim(clues, "deducted") or _has_status_claim(clues, "failed"):
-            case_type = "payment_failed"
-            severity = "high"
-            department = "payments_ops"
-            reason_codes.append("status_claim_no_match")
-        else:
-            case_type = "other"
-            severity = "low"
-            department = "customer_support"
-            reason_codes.append("no_match")
-
-    if txn_amount and txn_amount > 50_000 and severity != "critical":
-        severity = _bump_severity(severity, 1)
-        reason_codes.append("severity_boost_high_value")
-    if user_type == "merchant" and case_type == "merchant_settlement_delay" and severity == "low":
-        severity = "medium"
-        reason_codes.append("severity_boost_merchant")
-
-    # LLM override: only trust it when the rules fell back to a generic bucket
-    # (refund_request / other) OR when the LLM is more specific than the rules
-    # (e.g. "wrong_transfer" beats a generic transfer verdict). We never let
-    # the LLM downgrade a rules-detected critical/high-risk case.
-    _HIGH_RISK = {"wrong_transfer", "phishing_or_social_engineering", "duplicate_payment"}
-    if llm_case_type and llm_case_type != case_type:
-        if case_type in {"other", "refund_request"} or (
-            case_type not in _HIGH_RISK and llm_case_type in _HIGH_RISK
-        ):
-            new_severity, new_department = _LLM_ROUTE.get(
-                llm_case_type, (severity, department)
-            )
-            case_type = llm_case_type
-            severity = new_severity
-            department = new_department
-            reason_codes.append(f"llm_override_to_{llm_case_type}")
-
-    human_review = False
-    if severity == "critical":
-        human_review = True
-        reason_codes.append("human_review_critical")
-    elif severity == "high" and verdict_label != "consistent":
-        human_review = True
-        reason_codes.append("human_review_high_uncertain")
-    if verdict_label == "inconsistent":
-        human_review = True
-        reason_codes.append("human_review_inconsistent")
-    if verdict_label == "insufficient_data" and case_type in {"wrong_transfer", "duplicate_payment"}:
-        human_review = True
-        reason_codes.append("human_review_high_risk_uncertain")
-    # Wrong-transfer is a high-impact financial event — always require a human
-    # reviewer to authorise any reversal, even when the evidence is consistent.
-    if case_type == "wrong_transfer":
-        human_review = True
-        reason_codes.append("human_review_wrong_transfer")
-    if confidence < 0.7:
-        human_review = True
-        reason_codes.append("human_review_low_confidence")
-
+def classify(request: AnalyzeTicketRequest, evidence: EvidenceResult, settings: Settings) -> Classification:
+    case_type = _select_case_type(request, evidence)
+    severity = _select_severity(case_type, evidence, settings)
+    department = DEPARTMENT_BY_CASE[case_type]
+    human_review_required = _requires_human_review(case_type, evidence, severity, settings)
     return Classification(
         case_type=case_type,
         severity=severity,
         department=department,
-        human_review_required=human_review,
-        reason_codes=reason_codes,
+        human_review_required=human_review_required,
     )

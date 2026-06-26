@@ -1,5 +1,5 @@
-"""End-to-end reasoning tests against the 10 PRD sample cases."""
-from __future__ import annotations
+import json
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -7,62 +7,37 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 client = TestClient(app)
+FIXTURE = Path(__file__).parent / "fixtures" / "public_sample_cases.json"
+CASES = json.loads(FIXTURE.read_text(encoding="utf-8"))["cases"]
 
 
-@pytest.mark.parametrize("case_index", list(range(10)))
-def test_sample_case_matches_expected(sample_cases, case_index):
-    case = sample_cases[case_index]
-    resp = client.post("/analyze-ticket", json=case["request"])
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    expected = case["expected"]
+@pytest.mark.parametrize("case", CASES, ids=[case["id"] for case in CASES])
+def test_public_examples_match_required_reasoning_fields(case):
+    response = client.post("/analyze-ticket", json=case["input"])
+    assert response.status_code == 200, response.text
+    actual = response.json()
+    expected = case["expected_output"]
 
-    for key, want in expected.items():
-        got = body.get(key)
-        assert got == want, (
-            f"[{case['name']}] field '{key}': expected {want!r}, got {got!r}\n"
-            f"full body: {body}"
-        )
+    for field in (
+        "ticket_id", "relevant_transaction_id", "evidence_verdict", "case_type",
+        "severity", "department", "human_review_required",
+    ):
+        assert actual[field] == expected[field], f"{case['id']} mismatch in {field}: {actual}"
 
 
-def test_wrong_transfer_english_scores_consistent(sample_cases):
-    case = sample_cases[0]
-    resp = client.post("/analyze-ticket", json=case["request"])
-    body = resp.json()
-    assert body["relevant_transaction_id"] == "TXN-9101"
-    assert body["evidence_verdict"] == "consistent"
-
-
-def test_phishing_critical_overrides_everything(sample_cases):
-    case = sample_cases[5]
-    resp = client.post("/analyze-ticket", json=case["request"])
-    body = resp.json()
-    assert body["case_type"] == "phishing_or_social_engineering"
-    assert body["severity"] == "critical"
-    assert body["department"] == "fraud_risk"
+def test_inconsistent_wrong_transfer_pattern_is_flagged_for_human_review():
+    case = next(item for item in CASES if item["id"] == "SAMPLE-02")
+    response = client.post("/analyze-ticket", json=case["input"])
+    body = response.json()
+    assert body["evidence_verdict"] == "inconsistent"
     assert body["human_review_required"] is True
+    assert "established_recipient_pattern" in body["reason_codes"]
 
 
-def test_high_value_triggers_severity_boost(sample_cases):
-    case = sample_cases[9]  # 60,000 BDT refund_request → boosted to medium
-    resp = client.post("/analyze-ticket", json=case["request"])
-    body = resp.json()
-    assert body["case_type"] == "refund_request"
-    assert body["severity"] == "medium"
-
-
-def test_bangla_or_banglish_still_routes_correctly(sample_cases):
-    # Case 5 uses banglish; should still match correctly because ENABLE_LLM=false
-    case = sample_cases[4]
-    resp = client.post("/analyze-ticket", json=case["request"])
-    body = resp.json()
-    assert body["case_type"] == "agent_cash_in_issue"
-    assert body["department"] == "agent_operations"
-
-
-def test_no_match_insufficient_data(sample_cases):
-    case = sample_cases[7]  # vague complaint, empty history
-    resp = client.post("/analyze-ticket", json=case["request"])
-    body = resp.json()
-    assert body["evidence_verdict"] == "insufficient_data"
+def test_ambiguous_match_does_not_guess_a_transaction():
+    case = next(item for item in CASES if item["id"] == "SAMPLE-08")
+    body = client.post("/analyze-ticket", json=case["input"]).json()
     assert body["relevant_transaction_id"] is None
+    assert body["evidence_verdict"] == "insufficient_data"
+    assert body["case_type"] == "wrong_transfer"
+    assert body["human_review_required"] is False

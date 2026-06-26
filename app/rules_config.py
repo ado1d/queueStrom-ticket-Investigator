@@ -1,197 +1,82 @@
-"""Bilingual regex patterns and keyword dictionaries for the evidence engine.
+"""Centralized deterministic vocabulary and policy constants.
 
-Centralising these here keeps the deterministic core auditable and lets the
-classifier, evidence engine, and safety module all share a single source of
-truth for forbidden / helpful tokens.
+The lists intentionally focus on high-signal support language in English, Bangla,
+and common Banglish forms.  They are not a generative model and never execute
+instructions embedded in a complaint.
 """
 from __future__ import annotations
 
-import re
-from typing import Dict, List, Pattern
+from app.schemas import CaseType, Department
 
-# ---------------------------------------------------------------------------
-# Entity extraction patterns
-# ---------------------------------------------------------------------------
+BENGALI_DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
 
-# Amount: "5000 taka", "৫০০০ টাকা", "BDT 5000", "tk 200", "taka 1500".
-AMOUNT_PATTERNS: List[Pattern[str]] = [
-    re.compile(r"\b(\d{1,9}(?:[,]\d{2,3})?(?:\.\d+)?)\s*(taka|টাকা|tk|bdt)\b", re.IGNORECASE),
-    re.compile(r"\b(bdt|টাকা|taka|tk)\s*(\d{1,9}(?:[,]\d{2,3})?(?:\.\d+)?)\b", re.IGNORECASE),
-]
-
-# Bangla digits normalisation.
-_BANGLA_DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
-
-
-def normalise_text(text: str) -> str:
-    """Lowercase + translate Bangla digits to ASCII + collapse whitespace."""
-    lowered = (text or "").lower().translate(_BANGLA_DIGITS)
-    # Collapse runs of whitespace to a single space so "wrong   number" still
-    # matches the keyword "wrong number".
-    return re.sub(r"\s+", " ", lowered).strip()
-
-
-# Phone number pattern (Bangladesh mobile).
-PHONE_PATTERN = re.compile(r"\b01\d{9}\b")
-# Merchant ID: M followed by digits.
-MERCHANT_ID_PATTERN = re.compile(r"\bM\d{2,}\b", re.IGNORECASE)
-# Agent ID: A followed by digits.
-AGENT_ID_PATTERN = re.compile(r"\bA\d{2,}\b", re.IGNORECASE)
-# Generic alphanumeric counterparty hint.
-COUNTERPARTY_HINT_PATTERN = re.compile(r"\b(?:to|at|for|কাছে|কে)\s+([0-9A-Za-z+\-]{3,})", re.IGNORECASE)
-
-# Time hints: rough, the matching layer only uses these to score proximity.
-TIME_HINT_PATTERNS: Dict[str, Pattern[str]] = {
-    "today": re.compile(r"\b(today|আজ|এই দিন|আজকে)\b", re.IGNORECASE),
-    "yesterday": re.compile(r"\b(yesterday|গতকাল|কাল)\b", re.IGNORECASE),
-    "morning": re.compile(r"\b(morning|সকাল)\b", re.IGNORECASE),
-    "afternoon": re.compile(r"\b(afternoon|বিকাল|দুপুর)\b", re.IGNORECASE),
-    "evening": re.compile(r"\b(evening|সন্ধ্যা|রাত)\b", re.IGNORECASE),
-    "time_of_day": re.compile(r"\b(?:around|প্রায়)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm|টা)?\b", re.IGNORECASE),
+TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "phishing": (
+        "otp", "pin", "password", "passcode", "verification code", "security code",
+        "scam", "fraud", "fake call", "suspicious call", "called me", "called from",
+        "asked for my", "share my", "account blocked", "account will be blocked",
+        "ওটিপি", "পিন", "পাসওয়ার্ড", "পাসওয়ার্ড", "প্রতার", "স্ক্যাম", "ভুয়া",
+        "ভুয়া", "ফোন করেছে", "কল করেছে", "শেয়ার করতে", "শেয়ার করতে", "ব্লক",
+    ),
+    "wrong_transfer": (
+        "wrong number", "wrong recipient", "wrong person", "sent by mistake",
+        "transferred by mistake", "typed it wrong", "wrongly sent", "ভুল নম্বর",
+        "ভুল নাম্বার", "ভুল ব্যক্ত", "ভুল করে পাঠ", "ভুল করে টাকা", "রং নাম্বার",
+    ),
+    "transfer_nonreceipt": (
+        "didn't get it", "did not get it", "not received", "recipient did not receive",
+        "receiver did not receive", "brother didn't get", "he didn't get", "পায়নি",
+        "পাইনি", "পায়নি", "পাচ্ছে না", "পায় নি",
+    ),
+    "payment_failed": (
+        "payment failed", "app showed failed", "transaction failed", "failed but",
+        "balance deducted", "money deducted", "deducted from my balance", "charge failed",
+        "পেমেন্ট ব্যর্থ", "পেমেন্ট ফেল", "ব্যর্থ দেখাচ্ছে", "টাকা কেটে", "ব্যালেন্স কেটে",
+        "কেটে নিয়েছে", "কেটে নিয়েছে",
+    ),
+    "refund_request": (
+        "refund", "refund my", "return my money", "changed my mind",
+        "reverse it", "reversal", "রিফান্ড", "ফেরত", "ফিরিয়ে", "ফিরিয়ে", "টাকা ফেরত",
+    ),
+    "duplicate_payment": (
+        "twice", "two times", "duplicate", "double charged", "charged twice",
+        "deducted twice", "paid twice", "double deduction", "দুইবার", "দুবার", "দুই বার",
+        "ডাবল", "দ্বিগুণ", "দুইবার কেটে",
+    ),
+    "merchant_settlement": (
+        "settlement", "settled", "sales", "not settled", "settlement delay",
+        "মার্চেন্ট", "সেটেলমেন্ট", "বিক্রির", "বিক্রয়", "নিষ্পত্তি",
+    ),
+    "agent_cash_in": (
+        "cash in", "cash-in", "agent", "balance not reflected", "cash deposit",
+        "এজেন্ট", "ক্যাশ ইন", "ক্যাশইন", "ব্যালেন্সে টাকা আসেনি", "ব্যালেন্সে আসে নি",
+    ),
+    "transfer": ("transfer", "sent", "send money", "send taka", "পাঠিয়েছি", "পাঠিয়েছি", "ট্রান্সফার"),
+    "payment": ("paid", "pay", "payment", "bill", "recharge", "পেমেন্ট", "বিল", "রিচার্জ"),
 }
 
-# ---------------------------------------------------------------------------
-# Keyword dictionaries (English + Bangla + Banglish)
-# ---------------------------------------------------------------------------
+# Keywords that look like prompt injection rather than a support fact.  They are
+# stripped before reasoning, while ordinary adjacent complaint text is retained.
+INJECTION_MARKERS: tuple[str, ...] = (
+    "ignore previous", "ignore all", "system prompt", "developer message",
+    "jailbreak", "override instructions", "reveal secret", "show hidden",
+    "act as", "you are chatgpt", "prompt injection", "disregard",
+    "আগের নির্দেশ", "নির্দেশ উপেক্ষা", "সিস্টেম প্রম্পট", "গোপন নির্দেশ",
+)
 
-TRANSACTION_TYPE_KEYWORDS: Dict[str, List[str]] = {
-    "transfer": [
-        "send", "sent", "transfer", "transferred", "send money", "sent money",
-        "পাঠিয়েছি", "পাঠালাম", "ট্রান্সফার", "পাঠানো",
-        "pathachi", "pathalam", "pathano", "transfer korechi",
-    ],
-    "payment": [
-        "pay", "paid", "payment", "purchase", "bought",
-        "পেমেন্ট", "পেমেন্ট করেছি", "কিনেছি",
-        "payment korechi", "payment korlam",
-    ],
-    "cash_in": [
-        "cash in", "cash-in", "deposit", "add money", "top up", "topup",
-        "ক্যাশ ইন", "টাকা ঢুকেছে", "টাকা ঢোকানো",
-        "taka dhukechhe", "taka dhukano",
-    ],
-    "cash_out": [
-        "cash out", "cash-out", "withdraw", "withdrawal",
-        "ক্যাশ আউট", "তুলেছি", "উত্তোলন",
-        "tulechi", "uttolon",
-    ],
-    "settlement": [
-        "settlement", "settle", "merchant payout", "payout",
-        "সেটেলমেন্ট", "মার্চেন্ট পেমেন্ট",
-    ],
-    "refund": [
-        "refund", "refunded", "return money", "money back",
-        "ফেরত", "টাকা ফেরত", "রিফান্ড",
-        "ferot", "taka ferot",
-    ],
+DEPARTMENT_BY_CASE: dict[CaseType, Department] = {
+    CaseType.wrong_transfer: Department.dispute_resolution,
+    CaseType.payment_failed: Department.payments_ops,
+    CaseType.refund_request: Department.customer_support,
+    CaseType.duplicate_payment: Department.payments_ops,
+    CaseType.merchant_settlement_delay: Department.merchant_operations,
+    CaseType.agent_cash_in_issue: Department.agent_operations,
+    CaseType.phishing_or_social_engineering: Department.fraud_risk,
+    CaseType.other: Department.customer_support,
 }
 
-STATUS_CLAIM_KEYWORDS: Dict[str, List[str]] = {
-    "deducted": [
-        "deducted", "money deducted", "balance minus", "cut", "taken",
-        "কাটা হয়েছে", "কেটে নিয়েছে", "ব্যালেন্স কমেছে",
-        "kata hoyeche", "kate niyeche", "balance komeche",
-    ],
-    "failed": [
-        "failed", "didn't go through", "not successful", "unsuccessful",
-        "ব্যর্থ", "হয়নি", "সফল হয়নি",
-        "byartho", "hoyni", "sofol hoyni",
-    ],
-    "not_received": [
-        "not received", "didn't receive", "haven't got", "did not get", "missing",
-        "পাইনি", "পাইনি", "হাতে পাইনি",
-        "paini", "hate paini",
-    ],
-    "pending": [
-        "pending", "still waiting", "not yet",
-        "পেন্ডিং", "অপেক্ষা",
-        "pending ache", "opekkha",
-    ],
-    "completed": [
-        "completed", "success", "successful", "done",
-        "সফল", "হয়েছে",
-        "sofol", "hoyse",
-    ],
-}
-
-# Complaint topic keywords (used by classifier).
-TOPIC_KEYWORDS: Dict[str, List[str]] = {
-    "wrong_number": [
-        # English — single-word + multi-word variants
-        "wrong number", "wrong recipient", "wrong person", "wrong account",
-        "wrong people", "wrong user", "wrong mobile", "wrong phone",
-        "sent to wrong", "sent to the wrong", "send to wrong", "to the wrong",
-        "transferred to wrong", "transfer to wrong", "to wrong",
-        "mistaken number", "mistaken recipient", "mistakenly sent",
-        "mistakenly transferred", "mistakenly", "by mistake", "unintentionally",
-        "accidentally sent", "accidentally transferred", "accidentally paid",
-        "incorrect number", "incorrect recipient", "incorrect account",
-        "not the intended", "not intended recipient",
-        # Bangla + Banglish
-        "ভুল নম্বর", "ভুল নাম্বার", "ভুল মানুষ", "ভুলে পাঠিয়েছি",
-        "vul number", "vul manush", "vul namebar", "vul e pathiyechhi",
-        "bhul number", "bhul e",
-    ],
-    "refund": [
-        "refund", "money back", "return my money", "want my money back",
-        "ফেরত দিন", "টাকা ফেরত", "টাকা ফেরত চাই",
-        "taka ferot chai", "ferot din",
-    ],
-    "duplicate": [
-        "twice", "two times", "double charged", "charged twice", "duplicate",
-        "দুইবার", "দ্বিগুণ", "ডুপ্লিকেট",
-        "duibar", "duighun",
-    ],
-    "settlement": [
-        "settlement", "merchant settlement", "payout", "merchant payment",
-        "সেটেলমেন্ট", "মার্চেন্ট পেমেন্ট আটকে",
-    ],
-    "agent_cash_in": [
-        "agent cash in", "agent number", "agent did not", "agent didn't add",
-        "এজেন্ট", "এজেন্ট নম্বরে",
-        "agent number e", "agent taka dhukay nai",
-    ],
-    "phishing": [
-        "otp", "pin", "password", "secret code", "verification code",
-        "share my otp", "share my pin", "give my pin", "asked for otp",
-        "otp দিয়েছি", "পিন দিয়েছি",
-        "pin diyechhi", "otp diyechhi",
-        "suspicious call", "fake call", "scam call", "fraud call",
-        "সন্দেহজনক কল", "প্রতারণা", "ফেক কল",
-    ],
-}
-
-# ---------------------------------------------------------------------------
-# Safety blocklist
-# ---------------------------------------------------------------------------
-
-# Phrases that must NEVER appear in any output text field. Each pattern is
-# matched case-insensitively. The sanitizer in app/safety.py handles the
-# rewrites/redactions.
-FORBIDDEN_OUTPUT_PHRASES: List[Pattern[str]] = [
-    re.compile(r"\bpin\b", re.IGNORECASE),
-    re.compile(r"\botp\b", re.IGNORECASE),
-    re.compile(r"\bpassword\b", re.IGNORECASE),
-    re.compile(r"\bsecret code\b", re.IGNORECASE),
-    re.compile(r"\bverification code\b", re.IGNORECASE),
-    re.compile(r"\b(?:full\s+)?card\s+number\b", re.IGNORECASE),
-    re.compile(r"\b\d{4}\s*\d{4}\s*\d{4}\s*\d{4}\b"),  # 16-digit card
-    re.compile(r"\b(?:cvc|cvv)\b", re.IGNORECASE),
-    re.compile(r"\bwe will refund\b", re.IGNORECASE),
-    re.compile(r"\bwe have refunded\b", re.IGNORECASE),
-    re.compile(r"\bwe'?ll refund\b", re.IGNORECASE),
-    re.compile(r"\baccount (?:will be )?unblocked\b", re.IGNORECASE),
-    re.compile(r"\byour money will be reversed\b", re.IGNORECASE),
-]
-
-# Prompt-injection patterns to strip from complaint text BEFORE it is used in
-# templates (templates should never interpolate user text anyway, but the
-# sanitizer also scrubs LLM-returned strings).
-PROMPT_INJECTION_PATTERNS: List[Pattern[str]] = [
-    re.compile(r"ignore (?:all )?previous (?:instructions|prompts)", re.IGNORECASE),
-    re.compile(r"disregard (?:the )?system", re.IGNORECASE),
-    re.compile(r"you are now (?:a|an) ", re.IGNORECASE),
-    re.compile(r"system\s*:\s*", re.IGNORECASE),
-    re.compile(r"<\s*\|.*?\|\s*>", re.IGNORECASE),  # "<|...|>" style tokens
-    re.compile(r"###\s*instruction", re.IGNORECASE),
-]
+# Matching score tuning.  The values are deliberately explicit so a reviewer can
+# audit why a transaction was selected.
+MATCH_MINIMUM = 0.50
+AMBIGUITY_MARGIN = 0.12
+DUPLICATE_WINDOW_SECONDS = 10 * 60
