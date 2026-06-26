@@ -341,5 +341,5 @@ queuestorm-investigator/
 
 ## 📜 License & credits
 
-Built in 4.5 hours by Team **QueueStorm** for the **bKash SUST CSE Carnival
+Built in 4.5 hours by Team **VibeJS** for the **bKash SUST CSE Carnival
 2026**. MIT for the source; please credit if you reuse the templates.
