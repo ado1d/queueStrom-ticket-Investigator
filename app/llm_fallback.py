@@ -7,14 +7,21 @@ produces the customer reply, agent summary, or next action.
 Failure mode: any error (timeout, bad JSON, invalid enum) returns
 `LLMResult(used=False, ok=False)` and the pipeline falls back to a safe
 default. The classifier then sets `human_review_required = true`.
+
+Rate-limit handling:
+  * Exponential backoff with jitter on HTTP 429 / 5xx (up to 3 retries).
+  * In-memory LRU cache keyed on (complaint, txn_ids) so repeated identical
+    requests within the same process don't re-burn quota.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import random
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -26,6 +33,29 @@ GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "gemini-2.0-flash:generateContent"
 )
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Return True for transient errors worth retrying (429, 5xx, network)."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in {429, 500, 502, 503, 504}
+    return isinstance(exc, (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError))
+
+
+# In-process LRU cache for LLM results.
+_LLM_CACHE: Dict[Tuple[str, Tuple[str, ...]], "LLMResult"] = {}
+_LLM_CACHE_MAX = 64
+
+
+def _cache_key(complaint: str, transactions: List[Dict[str, Any]]) -> Tuple[str, Tuple[str, ...]]:
+    norm = re.sub(r"\s+", " ", (complaint or "").lower().strip())
+    txn_ids = tuple(t.get("transaction_id", "") for t in transactions)
+    return (norm, txn_ids)
+
+
+def clear_llm_cache() -> None:
+    """Test/admin helper to flush the cache."""
+    _LLM_CACHE.clear()
 
 ALLOWED_CASE_TYPES = {
     "wrong_transfer",
@@ -135,6 +165,13 @@ async def call_gemini(
     if not settings.llm_enabled:
         return LLMResult(used=False, ok=False, error="llm_disabled")
 
+    # Cache hit? Return the cached result immediately — saves quota.
+    key = _cache_key(complaint, transactions)
+    cached = _LLM_CACHE.get(key)
+    if cached is not None:
+        logger.info("gemini cache hit for complaint prefix=%r", complaint[:40])
+        return cached
+
     payload = {
         "systemInstruction": {
             "role": "system",
@@ -163,14 +200,43 @@ async def call_gemini(
 
     params = {"key": settings.gemini_api_key}
     timeout = httpx.Timeout(settings.llm_timeout, connect=3.0)
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(GEMINI_URL, params=params, json=payload)
-            response.raise_for_status()
-            body = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("gemini call failed: %s", exc)
-        return LLMResult(used=True, ok=False, error=str(exc))
+
+    # Exponential backoff: 1s, 2s, 4s (+jitter) on 429 / 5xx.
+    max_retries = 3
+    body: Optional[Dict[str, Any]] = None
+    last_error: Optional[str] = None
+    retryable_statuses = {429, 500, 502, 503, 504}
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for attempt in range(max_retries + 1):
+            try:
+                response = await client.post(GEMINI_URL, params=params, json=payload)
+                status = getattr(response, "status_code", 200)
+                if status in retryable_statuses and attempt < max_retries:
+                    delay = (2 ** attempt) + random.uniform(0, 0.5)
+                    logger.warning(
+                        "gemini returned %d (attempt %d/%d); retrying in %.2fs",
+                        status, attempt + 1, max_retries, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                response.raise_for_status()
+                body = response.json()
+                break
+            except (httpx.HTTPError, ValueError) as exc:
+                last_error = str(exc)
+                if attempt < max_retries and _is_retryable(exc):
+                    delay = (2 ** attempt) + random.uniform(0, 0.5)
+                    logger.warning(
+                        "gemini call raised %s (attempt %d/%d); retrying in %.2fs",
+                        type(exc).__name__, attempt + 1, max_retries, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                logger.warning("gemini call failed: %s", exc)
+                return LLMResult(used=True, ok=False, error=str(exc))
+
+    if body is None:
+        return LLMResult(used=True, ok=False, error=last_error or "unknown")
 
     # Extract text from Gemini's response shape.
     text = ""
@@ -192,4 +258,8 @@ async def call_gemini(
         return LLMResult(used=True, ok=False, error="invalid_enums", raw_text=text[:500])
 
     validated.raw_text = text[:500]
+    # Cache the successful result so repeat calls don't re-hit Gemini.
+    if len(_LLM_CACHE) >= _LLM_CACHE_MAX:
+        _LLM_CACHE.pop(next(iter(_LLM_CACHE)))
+    _LLM_CACHE[key] = validated
     return validated

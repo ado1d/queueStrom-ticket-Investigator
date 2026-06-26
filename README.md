@@ -153,6 +153,8 @@ realistic request/response pair.
 | `human_review_required`   | bool                | True for critical / high-risk cases         |
 | `confidence`              | number (0..1)       | Heuristic + LLM-boosted                     |
 | `reason_codes`            | array<string>       | Audit trail                                 |
+| `llm_used`                | bool                | True if Gemini was consulted and succeeded  |
+| `llm_status`              | string              | `ok` / `skipped` / `disabled` / `failed:<reason>` |
 
 **Error codes**:
 

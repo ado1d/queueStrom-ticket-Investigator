@@ -13,10 +13,14 @@ from typing import Dict, List, Pattern
 # Entity extraction patterns
 # ---------------------------------------------------------------------------
 
-# Amount: "5000 taka", "৫০০০ টাকা", "BDT 5000", "tk 200", "taka 1500".
+# Amount: "5000 taka", "৫০০০ টাকা", "BDT 5000", "tk 200", "taka 1500",
+# or bare numbers 100-999999 that look like monetary amounts in context.
 AMOUNT_PATTERNS: List[Pattern[str]] = [
     re.compile(r"\b(\d{1,9}(?:[,]\d{2,3})?(?:\.\d+)?)\s*(taka|টাকা|tk|bdt)\b", re.IGNORECASE),
     re.compile(r"\b(bdt|টাকা|taka|tk)\s*(\d{1,9}(?:[,]\d{2,3})?(?:\.\d+)?)\b", re.IGNORECASE),
+    # Bare number after "sent"/"transfer"/"pay"/"paid"/"cash in"/"cash out"
+    # e.g. "I sent 2000 to" — captures 2000 as the amount.
+    re.compile(r"\b(?:sent|send|transferred|transfer|paid|pay|cash[\s-]?in|cash[\s-]?out|deposit|deducted|charged|refund)\s+(\d{3,6}(?:,\d{2,3})?(?:\.\d+)?)\b", re.IGNORECASE),
 ]
 
 # Bangla digits normalisation.
@@ -38,7 +42,13 @@ MERCHANT_ID_PATTERN = re.compile(r"\bM\d{2,}\b", re.IGNORECASE)
 # Agent ID: A followed by digits.
 AGENT_ID_PATTERN = re.compile(r"\bA\d{2,}\b", re.IGNORECASE)
 # Generic alphanumeric counterparty hint.
-COUNTERPARTY_HINT_PATTERN = re.compile(r"\b(?:to|at|for|কাছে|কে)\s+([0-9A-Za-z+\-]{3,})", re.IGNORECASE)
+# Excludes common English stop-words so "to the wrong person" doesn't capture
+# "the" as a counterparty hint. Requires the captured group to start with a
+# digit, +, or an uppercase letter (merchant/agent IDs) OR be a 4+ char word.
+COUNTERPARTY_HINT_PATTERN = re.compile(
+    r"\b(?:to|at|for|কাছে|কে)\s+([+0-9][0-9+\-\s]{3,}|[A-Z][A-Z0-9\-]{2,}|[a-z][a-z]{3,})\b",
+    re.IGNORECASE,
+)
 
 # Time hints: rough, the matching layer only uses these to score proximity.
 TIME_HINT_PATTERNS: Dict[str, Pattern[str]] = {
@@ -99,8 +109,9 @@ STATUS_CLAIM_KEYWORDS: Dict[str, List[str]] = {
     ],
     "not_received": [
         "not received", "didn't receive", "haven't got", "did not get", "missing",
-        "পাইনি", "পাইনি", "হাতে পাইনি",
-        "paini", "hate paini",
+        "didn't get", "hasn't arrived", "not yet received",
+        "পাইনি", "হাতে পাইনি", "টাকা আসেনি", "আসেনি", "পায়নি",
+        "paini", "hate paini", "taka aseni", "aseni",
     ],
     "pending": [
         "pending", "still waiting", "not yet",

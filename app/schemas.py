@@ -104,3 +104,6 @@ class AnalyzeResponse(BaseModel):
     human_review_required: bool
     confidence: float = Field(..., ge=0.0, le=1.0)
     reason_codes: List[str] = Field(default_factory=list)
+    # Transparency: was the LLM consulted, and did it succeed?
+    llm_used: bool = False
+    llm_status: Optional[str] = None  # "ok" | "skipped" | "failed:<reason>" | "disabled"
