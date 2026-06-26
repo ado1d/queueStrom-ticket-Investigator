@@ -23,13 +23,16 @@ class Settings:
     port: int
     enable_llm: bool
     gemini_api_key: str
+    groq_api_key: str
     llm_timeout: float
     log_level: str
 
     @property
     def llm_enabled(self) -> bool:
-        """LLM is only active if both flag and key are set."""
-        return self.enable_llm and bool(self.gemini_api_key.strip())
+        """LLM is active if ENABLE_LLM is true AND at least one provider key is set."""
+        if not self.enable_llm:
+            return False
+        return bool(self.gemini_api_key.strip() or self.groq_api_key.strip())
 
 
 def _bool(value: str | None, default: bool) -> bool:
@@ -43,6 +46,7 @@ def load_settings() -> Settings:
         port=int(os.getenv("PORT", "8000")),
         enable_llm=_bool(os.getenv("ENABLE_LLM"), True),
         gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
+        groq_api_key=os.getenv("GROQ_API_KEY", ""),
         llm_timeout=float(os.getenv("LLM_TIMEOUT", "8")),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
     )

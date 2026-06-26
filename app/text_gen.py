@@ -3,6 +3,11 @@
 Per PRD section 12 / 13: the LLM NEVER writes the customer_reply. Templates
 interpolate only extracted facts (transaction id, amount, counterparty) --
 never raw complaint text. The safety suffix is appended by app.safety.
+
+Bilingual support: when the request language is 'bn' or 'mixed' (Bangla),
+the customer_reply is rendered in Bangla. agent_summary and
+recommended_next_action stay in English (they are internal agent-facing
+fields, not customer-facing).
 """
 from __future__ import annotations
 
@@ -27,7 +32,9 @@ def _counterparty(txn: Optional[Dict]) -> str:
     return str(txn.get("counterparty", "the agent"))
 
 
-_TEMPLATES = {
+# English templates — used for agent_summary, recommended_next_action always,
+# and for customer_reply when language is "en" or unknown.
+_TEMPLATES_EN = {
     "wrong_transfer": {
         "summary": (
             "Customer reports transferring {amount} to the wrong recipient"
@@ -145,11 +152,51 @@ _TEMPLATES = {
             "customer."
         ),
         "reply": (
-            "Thank you for contacting us. We have received your message and our "
-            "support team will review your case and respond through official "
-            "channels."
+            "Thank you for contacting us. To help us investigate, please share "
+            "the transaction ID, the amount involved, and a short description of "
+            "what went wrong. Our support team will review your case and respond "
+            "through official channels."
         ),
     },
+}
+
+
+# Bangla customer_reply templates. agent_summary and next_action fall back
+# to English (they're internal agent-facing fields).
+_TEMPLATES_BN_REPLY = {
+    "wrong_transfer": (
+        "আপনার লেনদেন {txn_id} এর বিষয়ে আমরা অবগত হয়েছি। আমাদের ডিসপিউট টিম বিষয়টি "
+        "যাচাই করবে এবং অফিসিয়াল চ্যানেলে আপনাকে জানাবে।"
+    ),
+    "payment_failed": (
+        "আপনার পেমেন্ট {txn_id} ({amount}) সম্পর্কে আমরা অবগত হয়েছি। আমাদের পেমেন্টস "
+        "টিম বিষয়টি যাচাই করবে এবং প্রযোজ্য হলে অফিসিয়াল চ্যানেলে ফেরত প্রক্রিয়া করবে।"
+    ),
+    "refund_request": (
+        "আপনার ফেরত অনুরোধ সম্পর্কে আমরা অবগত হয়েছি (লেনদেন {txn_id}, {amount})। নীতি "
+        "অনুযায়ী যাচাইয়ের পর প্রযোজ্য ফেরত অফিসিয়াল চ্যানেলে প্রক্রিয়া করা হবে।"
+    ),
+    "duplicate_payment": (
+        "আপনার লেনদেন {txn_id} ({amount}) এ সম্ভাব্য ডুপ্লিকেট চার্জ সম্পর্কে আমরা অবগত "
+        "হয়েছি। আমাদের পেমেন্টস টিম যাচাই করে অফিসিয়াল চ্যানেলে প্রযোজ্য ফেরত প্রক্রিয়া করবে।"
+    ),
+    "merchant_settlement_delay": (
+        "আপনার সেটেলমেন্ট {txn_id} ({amount}) সম্পর্কে আমরা অবগত হয়েছি। আমাদের "
+        "মার্চেন্ট অপারেশন্স টিম ব্যাচ স্ট্যাটাস যাচাই করে অফিসিয়াল চ্যানেলে আপনাকে জানাবে।"
+    ),
+    "agent_cash_in_issue": (
+        "আপনার লেনদেন {txn_id} এর বিষয়ে আমরা অবগত হয়েছি। আমাদের এজেন্ট অপারেশন্স দল "
+        "এটি দ্রুত যাচাই করবে এবং অফিসিয়াল চ্যানেলে আপনাকে জানাবে।"
+    ),
+    "phishing_or_social_engineering": (
+        "অনুগ্রহ করে সতর্ক থাকার জন্য ধন্যবাদ। আমরা কখনোই আপনার পিন, ওটিপি বা পাসওয়ার্ড "
+        "চাই না। আমাদের ফ্রড টিম বিষয়টি খতিয়ে দেখছে এবং অফিসিয়াল চ্যানেলে আপনার সাথে "
+        "যোগাযোগ করবে।"
+    ),
+    "other": (
+        "আপনার সমস্যা সম্পর্কে আমরা অবগত হয়েছি। দ্রুত সহায়তার জন্য অনুগ্রহ করে লেনদেন "
+        "আইডি, পরিমাণ এবং সমস্যার সংক্ষিপ্ত বিবরণ শেয়ার করুন।"
+    ),
 }
 
 
@@ -177,8 +224,9 @@ def render_text(
     clues,
     matched_txn: Optional[Dict],
     verdict_label: str,
+    language: Optional[str] = None,
 ) -> Dict[str, str]:
-    template = _TEMPLATES.get(case_type, _TEMPLATES["other"])
+    template = _TEMPLATES_EN.get(case_type, _TEMPLATES_EN["other"])
     amount = getattr(clues, "amount", None)
     if amount is None and matched_txn is not None:
         amount = matched_txn.get("amount")
@@ -200,8 +248,20 @@ def render_text(
             txn_clause=txn_clause,
         )
 
+    # Default: English reply.
+    reply = _fill(template["reply"])
+
+    # If language is Bangla or mixed, use the Bangla reply template.
+    # The Bangla templates use {txn_id} and {amount} placeholders only.
+    if language in {"bn", "mixed"} and case_type in _TEMPLATES_BN_REPLY:
+        bn_template = _TEMPLATES_BN_REPLY[case_type]
+        try:
+            reply = bn_template.format(txn_id=txn_id, amount=amount_str)
+        except (KeyError, IndexError):
+            reply = _fill(template["reply"])  # fall back to English
+
     return {
         "agent_summary": _fill(template["summary"]),
         "recommended_next_action": _fill(template["next_action"]),
-        "customer_reply": _fill(template["reply"]),
+        "customer_reply": reply,
     }

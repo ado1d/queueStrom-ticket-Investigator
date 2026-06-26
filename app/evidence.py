@@ -258,15 +258,31 @@ MATCH_THRESHOLD = 4  # PRD §11.2
 
 
 def match_transaction(scored: List[ScoredTransaction]) -> Optional[str]:
-    """Pick the highest scoring transaction; require threshold + uniqueness."""
+    """Pick the highest scoring transaction; require threshold + uniqueness.
+
+    Returns None when:
+      - No transactions scored.
+      - Top score is below MATCH_THRESHOLD (4).
+      - Top two transactions tie (ambiguous).
+      - Top two transactions are within 1 point of each other AND there are
+        3+ transactions at/above threshold (multi-match ambiguity — refuse
+        to guess which one the customer means).
+    """
     if not scored:
         return None
     ranked = sorted(scored, key=lambda s: s.score, reverse=True)
     if ranked[0].score < MATCH_THRESHOLD:
         return None
     if len(ranked) > 1 and ranked[0].score == ranked[1].score:
-        # Tie: ambiguous → refuse to pick one
+        # Exact tie: ambiguous → refuse to pick one
         return None
+    # Near-tie with multiple plausible candidates: also refuse. This catches
+    # cases like "I sent 1000 to my brother" where 3 transactions of 1000
+    # exist and the status-claim nudge only barely distinguishes one.
+    if len(ranked) >= 3:
+        above_threshold = [s for s in ranked if s.score >= MATCH_THRESHOLD]
+        if len(above_threshold) >= 3 and (ranked[0].score - ranked[1].score) <= 1:
+            return None
     return ranked[0].transaction_id
 
 
@@ -298,17 +314,87 @@ def verdict(
 
 
 def _detect_contradictions(clues: Clues, txn) -> List[str]:
-    """Return a list of human-readable contradiction strings."""
+    """Return a list of human-readable contradiction strings.
+
+    Note: we do NOT flag 'deducted' + 'failed' as a contradiction. A customer
+    reporting 'my balance was deducted but the payment failed' is the canonical
+    payment_failed scenario — the customer's *claim* about deduction is what
+    we investigate, not a contradiction of the txn record. Flagging it as
+    inconsistent would suppress the payments_ops routing we want.
+    """
     issues: List[str] = []
-    # Customer says "failed" but txn is completed to a known counterparty.
+    # Customer says 'failed' but txn is completed to a known counterparty.
     if clues.status_claim == "failed" and txn.status == "completed":
         issues.append("status_claim_failed_but_completed")
-    # Customer says "deducted" but txn is failed (no money taken).
-    if clues.status_claim == "deducted" and txn.status == "failed":
-        issues.append("status_claim_deducted_but_failed")
-    # Wrong-transfer claim with a counterparty that recurs in history would
-    # be a fraud signal, surfaced by the classifier (not here).
     return issues
+
+
+def detect_established_recipient_pattern(
+    matched_id: Optional[str],
+    transactions: List,
+) -> bool:
+    """Return True if the matched transaction's counterparty has 2+ prior
+    completed transfers in the customer's history.
+
+    This is a strong signal that the 'wrong transfer' claim is suspicious —
+    the customer has been sending money to this recipient regularly. We mark
+    the verdict as 'inconsistent' so a human reviews before any reversal.
+    """
+    if matched_id is None:
+        return False
+    matched = next((t for t in transactions if t.transaction_id == matched_id), None)
+    if matched is None or matched.type != "transfer":
+        return False
+    counterparty = (matched.counterparty or "").lower()
+    if not counterparty:
+        return False
+    prior = sum(
+        1 for t in transactions
+        if t.transaction_id != matched_id
+        and t.type == "transfer"
+        and t.status == "completed"
+        and (t.counterparty or "").lower() == counterparty
+    )
+    return prior >= 2
+
+
+def detect_duplicate_pair(
+    transactions: List,
+) -> Optional[tuple]:
+    """Look for two transactions that look like a duplicate pair.
+
+    Criteria: same amount (±0), same counterparty, same type, both completed,
+    within 60 seconds of each other. Returns (first_txn_id, second_txn_id)
+    where second is the later one (the suspected duplicate).
+    """
+    from datetime import datetime
+    completed = [
+        t for t in transactions
+        if t.status == "completed" and t.amount > 0
+    ]
+    if len(completed) < 2:
+        return None
+    # Sort by timestamp ascending
+    def _ts(t):
+        try:
+            s = t.timestamp
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            return datetime.fromisoformat(s)
+        except (ValueError, AttributeError):
+            return datetime.min
+    completed.sort(key=_ts)
+    for i in range(len(completed) - 1):
+        a, b = completed[i], completed[i + 1]
+        if (
+            a.type == b.type
+            and abs(a.amount - b.amount) < 0.01
+            and (a.counterparty or "").lower() == (b.counterparty or "").lower()
+        ):
+            ta, tb = _ts(a), _ts(b)
+            if (tb - ta).total_seconds() <= 60:
+                return (a.transaction_id, b.transaction_id)
+    return None
 
 
 # ---------------------------------------------------------------------------

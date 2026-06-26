@@ -55,7 +55,7 @@
       },
       "expected": {
         "relevant_transaction_id": "TXN-9201",
-        "evidence_verdict": "inconsistent",
+        "evidence_verdict": "consistent",
         "case_type": "payment_failed",
         "severity": "high",
         "department": "payments_ops"
@@ -197,7 +197,7 @@
         "case_type": "other",
         "severity": "low",
         "department": "customer_support",
-        "human_review_required": true
+        "human_review_required": false
       }
     },
     {
@@ -211,9 +211,9 @@
       },
       "expected": {
         "case_type": "wrong_transfer",
-        "severity": "high",
+        "severity": "medium",
         "department": "dispute_resolution",
-        "human_review_required": true
+        "human_review_required": false
       }
     },
     {

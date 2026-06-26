@@ -1,4 +1,4 @@
-"""LLM fallback tests (httpx is mocked, no real Gemini call)."""
+"""LLM fallback tests (httpx is mocked, no real LLM call)."""
 from __future__ import annotations
 
 import json
@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from app import config
-from app.llm_fallback import LLMResult, _extract_json, _validate, call_gemini
+from app.llm_fallback import LLMResult, _extract_json, _validate, call_gemini, clear_llm_cache
 
 
 def test_extract_json_strips_fences():
@@ -49,15 +49,19 @@ async def test_call_gemini_returns_used_false_when_disabled(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_call_gemini_timeout_falls_back(monkeypatch):
+    # Force the Gemini provider path with a fake key.
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
     monkeypatch.setattr(config.settings, "enable_llm", True, raising=False)
     monkeypatch.setattr(config.settings, "gemini_api_key", "fake-key", raising=False)
     monkeypatch.setattr(config.settings, "llm_timeout", 0.1, raising=False)
+    clear_llm_cache()
 
     async def _raise(*_a, **_kw):
         raise httpx.ReadTimeout("boom")
 
     monkeypatch.setattr(httpx.AsyncClient, "post", _raise)
-    out = await call_gemini("hi", [], "en")
+    out = await call_gemini("hi-unique-timeout-test", [], "en")
     assert out.used is True
     assert out.ok is False
     assert out.error is not None
@@ -65,10 +69,16 @@ async def test_call_gemini_timeout_falls_back(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_call_gemini_parses_valid_response(monkeypatch):
+    # Force Gemini provider + clear cache so the mock response is used.
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
     monkeypatch.setattr(config.settings, "enable_llm", True, raising=False)
     monkeypatch.setattr(config.settings, "gemini_api_key", "fake-key", raising=False)
+    clear_llm_cache()
 
     class _Resp:
+        status_code = 200
+
         def __init__(self, body: Dict[str, Any]):
             self._body = body
 
@@ -110,7 +120,7 @@ async def test_call_gemini_parses_valid_response(monkeypatch):
             })
 
     monkeypatch.setattr(httpx, "AsyncClient", _Client)
-    out = await call_gemini("wrong number 5000 taka", [], "en")
+    out = await call_gemini("unique-valid-response-test-xyz", [], "en")
     assert out.ok is True
     assert out.relevant_txn_id == "TXN-1"
     assert out.case_type == "wrong_transfer"
@@ -120,10 +130,14 @@ async def test_call_gemini_parses_valid_response(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_call_gemini_rejects_invalid_enum(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
     monkeypatch.setattr(config.settings, "enable_llm", True, raising=False)
     monkeypatch.setattr(config.settings, "gemini_api_key", "fake-key", raising=False)
+    clear_llm_cache()
 
     class _Resp:
+        status_code = 200
         def raise_for_status(self): return None
         def json(self): return {"candidates": [{"content": {"parts": [{"text": json.dumps({"case_type": "hackerman"})}]}}]}
 
@@ -134,6 +148,45 @@ async def test_call_gemini_rejects_invalid_enum(monkeypatch):
         async def post(self, *_, **__): return _Resp()
 
     monkeypatch.setattr(httpx, "AsyncClient", _Client)
-    out = await call_gemini("hi", [], "en")
+    out = await call_gemini("unique-invalid-enum-test-abc", [], "en")
     assert out.ok is False
     assert out.error == "invalid_enums"
+
+
+@pytest.mark.asyncio
+async def test_call_groq_parses_valid_response(monkeypatch):
+    """Verify the Groq provider path works with an OpenAI-shaped response."""
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_fake")
+    monkeypatch.setattr(config.settings, "enable_llm", True, raising=False)
+    monkeypatch.setattr(config.settings, "groq_api_key", "gsk_fake", raising=False)
+    clear_llm_cache()
+
+    class _Resp:
+        status_code = 200
+        def raise_for_status(self): return None
+        def json(self):
+            return {
+                "choices": [
+                    {"message": {"content": json.dumps({
+                        "relevant_txn_id": "TXN-GROQ-1",
+                        "case_type": "refund_request",
+                        "contradiction": False,
+                        "amount": 750,
+                        "counterparty_hint": None,
+                    })}}
+                ]
+            }
+
+    class _Client:
+        def __init__(self, *_, **__): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return None
+        async def post(self, *_, **__): return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    out = await call_gemini("groq-test-unique-complaint-123", [], "en")
+    assert out.ok is True
+    assert out.relevant_txn_id == "TXN-GROQ-1"
+    assert out.case_type == "refund_request"
+    assert out.amount == 750
