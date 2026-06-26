@@ -179,8 +179,8 @@ These are enforced by `app/safety.py` and verified by `tests/test_safety.py`:
 4. **Account-unblock rewrite**: "account will be unblocked" becomes "account
    access will be reviewed".
 5. **Mandatory suffix**: every `customer_reply` ends with:
-   > *"Please do not share your PIN, OTP, or password with anyone. bKash will
-   > never ask for these."*
+   > *"Please do not share your PIN, OTP, or password with anyone. Our team
+   > will never ask for these."*
 6. **LLM isolation**: the LLM only sees a structured prompt asking for JSON
    `{"relevant_txn_id","case_type","contradiction","amount","counterparty_hint"}`.
    It never writes the customer-facing reply.

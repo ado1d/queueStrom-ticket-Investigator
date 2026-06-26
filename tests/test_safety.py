@@ -21,7 +21,7 @@ def test_safety_suffix_always_appended():
         "customer_reply": "We are reviewing your case.",
     })
     assert cleaned["customer_reply"].endswith(
-        "bKash will never ask for these."
+        "Our team will never ask for these."
     )
     assert "PIN" in cleaned["customer_reply"]
     assert "OTP" in cleaned["customer_reply"]
@@ -67,7 +67,7 @@ def test_complaint_with_otp_pin_does_not_leak_into_reply():
         text = body[field].lower()
         assert "1234" not in text
     # Safety suffix is present on customer_reply
-    assert "bKash will never ask for these" in body["customer_reply"]
+    assert "Our team will never ask for these" in body["customer_reply"]
     # The phishing detector SHOULD fire on the OTP/PIN mention
     assert body["case_type"] == "phishing_or_social_engineering"
     assert body["severity"] == "critical"

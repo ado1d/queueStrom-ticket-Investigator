@@ -24,8 +24,11 @@ _BANGLA_DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
 
 
 def normalise_text(text: str) -> str:
-    """Lowercase + translate Bangla digits to ASCII for regex matching."""
-    return text.lower().translate(_BANGLA_DIGITS)
+    """Lowercase + translate Bangla digits to ASCII + collapse whitespace."""
+    lowered = (text or "").lower().translate(_BANGLA_DIGITS)
+    # Collapse runs of whitespace to a single space so "wrong   number" still
+    # matches the keyword "wrong number".
+    return re.sub(r"\s+", " ", lowered).strip()
 
 
 # Phone number pattern (Bangladesh mobile).
@@ -114,9 +117,20 @@ STATUS_CLAIM_KEYWORDS: Dict[str, List[str]] = {
 # Complaint topic keywords (used by classifier).
 TOPIC_KEYWORDS: Dict[str, List[str]] = {
     "wrong_number": [
-        "wrong number", "wrong recipient", "sent to wrong", "mistaken number",
-        "ভুল নম্বর", "ভুল নাম্বার", "ভুল মানুষ",
-        "vul number", "vul manush", "vul namebar",
+        # English — single-word + multi-word variants
+        "wrong number", "wrong recipient", "wrong person", "wrong account",
+        "wrong people", "wrong user", "wrong mobile", "wrong phone",
+        "sent to wrong", "sent to the wrong", "send to wrong", "to the wrong",
+        "transferred to wrong", "transfer to wrong", "to wrong",
+        "mistaken number", "mistaken recipient", "mistakenly sent",
+        "mistakenly transferred", "mistakenly", "by mistake", "unintentionally",
+        "accidentally sent", "accidentally transferred", "accidentally paid",
+        "incorrect number", "incorrect recipient", "incorrect account",
+        "not the intended", "not intended recipient",
+        # Bangla + Banglish
+        "ভুল নম্বর", "ভুল নাম্বার", "ভুল মানুষ", "ভুলে পাঠিয়েছি",
+        "vul number", "vul manush", "vul namebar", "vul e pathiyechhi",
+        "bhul number", "bhul e",
     ],
     "refund": [
         "refund", "money back", "return my money", "want my money back",

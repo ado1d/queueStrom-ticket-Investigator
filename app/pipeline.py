@@ -29,13 +29,16 @@ def _should_call_llm(
     confidence: float,
     matched_id: Optional[str],
 ) -> bool:
+    """Decide whether the LLM fallback should run.
+
+    Per updated behavior: whenever the LLM is enabled it runs on every request.
+    The rules-based classifier still produces a normal answer if the LLM fails
+    or returns no usable result — the LLM only augments (extra clues,
+    contradiction flag, candidate txn id, confidence nudge).
+    """
     if not settings.llm_enabled:
         return False
-    if matched_id is None and confidence < 0.5:
-        return True
-    if language in {"bn", "mixed"} and confidence < 0.7:
-        return True
-    return False
+    return True
 
 
 def _apply_llm_facts(
@@ -115,6 +118,11 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
         elif llm_result and not llm_result.ok:
             logger.info("LLM returned no usable result: %s", llm_result.error)
 
+    # 4b. Stash LLM-suggested case_type so the classifier can prefer it.
+    llm_case_type: Optional[str] = None
+    if llm_result and llm_result.ok and llm_result.case_type:
+        llm_case_type = llm_result.case_type
+
     # 5. Classify + route.
     classification = classify(
         clues=clues,
@@ -122,6 +130,7 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
         matched_txn=matched_txn_dict,
         user_type=request.user_type,
         confidence=confidence,
+        llm_case_type=llm_case_type,
     )
 
     # 6. Render safe text.

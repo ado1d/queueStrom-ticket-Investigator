@@ -32,6 +32,19 @@ class Classification:
 
 _SEVERITY_ORDER = ["low", "medium", "high", "critical"]
 
+# When the LLM overrides the rules-based case_type, look up the canonical
+# (severity, department) pair from this table. Keeps the override deterministic.
+_LLM_ROUTE: Dict[str, tuple] = {
+    "wrong_transfer": ("high", "dispute_resolution"),
+    "payment_failed": ("high", "payments_ops"),
+    "refund_request": ("low", "customer_support"),
+    "duplicate_payment": ("high", "payments_ops"),
+    "merchant_settlement_delay": ("medium", "merchant_operations"),
+    "agent_cash_in_issue": ("high", "agent_operations"),
+    "phishing_or_social_engineering": ("critical", "fraud_risk"),
+    "other": ("low", "customer_support"),
+}
+
 
 def _bump_severity(severity: str, levels: int = 1) -> str:
     try:
@@ -55,6 +68,7 @@ def classify(
     matched_txn: Optional[Dict],
     user_type: Optional[str] = None,
     confidence: float = 1.0,
+    llm_case_type: Optional[str] = None,
 ) -> Classification:
     reason_codes: List[str] = []
 
@@ -191,6 +205,23 @@ def classify(
     if user_type == "merchant" and case_type == "merchant_settlement_delay" and severity == "low":
         severity = "medium"
         reason_codes.append("severity_boost_merchant")
+
+    # LLM override: only trust it when the rules fell back to a generic bucket
+    # (refund_request / other) OR when the LLM is more specific than the rules
+    # (e.g. "wrong_transfer" beats a generic transfer verdict). We never let
+    # the LLM downgrade a rules-detected critical/high-risk case.
+    _HIGH_RISK = {"wrong_transfer", "phishing_or_social_engineering", "duplicate_payment"}
+    if llm_case_type and llm_case_type != case_type:
+        if case_type in {"other", "refund_request"} or (
+            case_type not in _HIGH_RISK and llm_case_type in _HIGH_RISK
+        ):
+            new_severity, new_department = _LLM_ROUTE.get(
+                llm_case_type, (severity, department)
+            )
+            case_type = llm_case_type
+            severity = new_severity
+            department = new_department
+            reason_codes.append(f"llm_override_to_{llm_case_type}")
 
     human_review = False
     if severity == "critical":

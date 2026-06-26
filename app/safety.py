@@ -18,7 +18,7 @@ from .rules_config import (
 
 SAFETY_SUFFIX = (
     "Please do not share your PIN, OTP, or password with anyone. "
-    "bKash will never ask for these."
+    "Our team will never ask for these."
 )
 
 REPLACEMENTS = [
